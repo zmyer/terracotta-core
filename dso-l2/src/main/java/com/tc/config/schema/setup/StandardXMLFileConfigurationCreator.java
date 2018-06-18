@@ -18,7 +18,8 @@
  */
 package com.tc.config.schema.setup;
 
-import org.apache.commons.io.IOUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.terracotta.config.TcConfig;
 import org.xml.sax.SAXException;
 import org.xml.sax.SAXParseException;
@@ -26,30 +27,23 @@ import org.xml.sax.SAXParseException;
 import org.terracotta.config.TcConfiguration;
 import com.tc.config.schema.beanfactory.BeanWithErrors;
 import com.tc.config.schema.beanfactory.ConfigBeanFactory;
-import com.tc.config.schema.repository.BeanRepository;
-import com.tc.config.schema.setup.ConfigurationSetupException;
 import com.tc.config.schema.setup.sources.ConfigurationSource;
 import com.tc.config.schema.setup.sources.FileConfigurationSource;
 import com.tc.config.schema.setup.sources.ResourceConfigurationSource;
 import com.tc.config.schema.setup.sources.ServerConfigurationSource;
 import com.tc.config.schema.setup.sources.URLConfigurationSource;
-import com.tc.logging.CustomerLogging;
-import com.tc.logging.TCLogger;
 import com.tc.logging.TCLogging;
-import com.tc.net.core.SecurityInfo;
 import com.tc.properties.TCPropertiesConsts;
 import com.tc.properties.TCPropertiesImpl;
-import com.tc.security.PwProvider;
 import com.tc.util.Assert;
 import com.tc.util.concurrent.ThreadUtil;
+import com.tc.util.io.IOUtils;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.UnsupportedEncodingException;
-import java.net.URLDecoder;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -61,7 +55,7 @@ import javax.xml.parsers.ParserConfigurationException;
  */
 public class StandardXMLFileConfigurationCreator implements ConfigurationCreator {
 
-  private static final TCLogger consoleLogger = CustomerLogging.getConsoleLogger();
+  private static final Logger consoleLogger = TCLogging.getConsoleLogger();
   private static final long GET_CONFIGURATION_TOTAL_TIMEOUT = TCPropertiesImpl.getProperties()
       .getLong(TCPropertiesConsts.TC_CONFIG_TOTAL_TIMEOUT);
 
@@ -76,7 +70,7 @@ public class StandardXMLFileConfigurationCreator implements ConfigurationCreator
 
   private final ConfigurationSpec configurationSpec;
   private final ConfigBeanFactory beanFactory;
-  private final TCLogger logger;
+  private final Logger logger;
 
   private boolean baseConfigLoadedFromTrustedSource;
   private String serverOverrideConfigDescription;
@@ -85,26 +79,19 @@ public class StandardXMLFileConfigurationCreator implements ConfigurationCreator
   private String baseConfigDescription = "";
   private TcConfiguration tcConfigDocument;
   private TcConfiguration providedTcConfigDocument;
-  private final PwProvider pwProvider;
-  
+
   private ClassLoader loader;
 
   public StandardXMLFileConfigurationCreator(ConfigurationSpec configurationSpec, ConfigBeanFactory beanFactory) {
-    this(TCLogging.getLogger(StandardXMLFileConfigurationCreator.class), configurationSpec, beanFactory, null);
+    this(LoggerFactory.getLogger(StandardXMLFileConfigurationCreator.class), configurationSpec, beanFactory);
   }
 
-  public StandardXMLFileConfigurationCreator(ConfigurationSpec configurationSpec, ConfigBeanFactory beanFactory,
-                                             PwProvider pwProvider) {
-    this(TCLogging.getLogger(StandardXMLFileConfigurationCreator.class), configurationSpec, beanFactory, pwProvider);
-  }
-
-  public StandardXMLFileConfigurationCreator(TCLogger logger, ConfigurationSpec configurationSpec,
-                                             ConfigBeanFactory beanFactory, PwProvider pwProvider) {
+  public StandardXMLFileConfigurationCreator(Logger logger, ConfigurationSpec configurationSpec,
+                                             ConfigBeanFactory beanFactory) {
     Assert.assertNotNull(beanFactory);
     this.logger = logger;
     this.beanFactory = beanFactory;
     this.configurationSpec = configurationSpec;
-    this.pwProvider = pwProvider;
   }
   
   @Override
@@ -186,25 +173,11 @@ public class StandardXMLFileConfigurationCreator implements ConfigurationCreator
   private ConfigurationSource attemptToCreateServerSource(String text) {
     Matcher matcher = SERVER_PATTERN.matcher(text);
     if (matcher.matches()) {
-      boolean secure = false;
-      String username = null;
       String host = matcher.group(1);
-      int userSeparatorIndex = host.indexOf('@');
-      if (userSeparatorIndex > -1) {
-        username = host.substring(0, userSeparatorIndex);
-        try {
-          username = URLDecoder.decode(username, "UTF-8");
-        } catch (UnsupportedEncodingException uee) {
-          // cannot happen
-        }
-        secure = true;
-        host = host.substring(userSeparatorIndex + 1);
-      }
-      final SecurityInfo securityInfo = new SecurityInfo(secure, username);
       String portText = matcher.group(2);
 
       try {
-        return new ServerConfigurationSource(host.trim(), Integer.parseInt(portText.trim()), securityInfo, pwProvider);
+        return new ServerConfigurationSource(host.trim(), Integer.parseInt(portText.trim()));
       } catch (Exception e) {/**/
       }
     }
@@ -342,7 +315,7 @@ public class StandardXMLFileConfigurationCreator implements ConfigurationCreator
 
     text.append("\n\nTo correct this problem specify a valid configuration location using the -f/--config command-line options.");
 
-    consoleLogger.error(text);
+    consoleLogger.error(text.toString());
     throw new ConfigurationSetupException(text.toString());
   }
 

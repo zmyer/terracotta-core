@@ -18,8 +18,9 @@
  */
 package com.tc.net.protocol.transport;
 
+import org.slf4j.Logger;
+
 import com.tc.bytes.TCByteBuffer;
-import com.tc.logging.TCLogger;
 import com.tc.net.TCSocketAddress;
 import com.tc.net.core.TCConnection;
 import com.tc.net.core.event.TCConnectionErrorEvent;
@@ -41,7 +42,7 @@ import java.util.concurrent.atomic.AtomicReference;
 abstract class MessageTransportBase extends AbstractMessageTransport implements TCConnectionEventListener {
   private TCConnection                             connection;
 
-  protected ConnectionID                           connectionId           = new ConnectionID(JvmIDUtil.getJvmID(),
+  private ConnectionID                           connectionId           = new ConnectionID(JvmIDUtil.getJvmID(),
                                                                                              ChannelID.NULL_ID.toLong());
   protected final MessageTransportStatus           status;
   protected final AtomicBoolean                    isOpen;
@@ -57,7 +58,7 @@ abstract class MessageTransportBase extends AbstractMessageTransport implements 
 
   protected MessageTransportBase(MessageTransportState initialState,
                                  TransportHandshakeErrorHandler handshakeErrorHandler,
-                                 TransportHandshakeMessageFactory messageFactory, boolean isOpen, TCLogger logger) {
+                                 TransportHandshakeMessageFactory messageFactory, boolean isOpen, Logger logger) {
 
     super(logger);
     this.handshakeErrorHandler = handshakeErrorHandler;
@@ -150,7 +151,7 @@ abstract class MessageTransportBase extends AbstractMessageTransport implements 
     synchronized (isOpen) {
       if (!isOpen.get()) {
         // see DEV-659: we used to throw an assertion error here if already closed
-        getLogger().warn("Can only close an open connection");
+        getLogger().debug("Can only close an open connection");
         return;
       }
       if (disconnect) {
@@ -228,9 +229,9 @@ abstract class MessageTransportBase extends AbstractMessageTransport implements 
   private static final class DefaultConnectionAttacher implements ConnectionAttacher {
 
     private final MessageTransportBase transport;
-    private final TCLogger             logger;
+    private final Logger logger;
 
-    private DefaultConnectionAttacher(MessageTransportBase transport, TCLogger logger) {
+    private DefaultConnectionAttacher(MessageTransportBase transport, Logger logger) {
       this.transport = transport;
       this.logger = logger;
     }
@@ -265,6 +266,7 @@ abstract class MessageTransportBase extends AbstractMessageTransport implements 
 
   @Override
   public void connectEvent(TCConnectionEvent event) {
+    status.connected();
     return;
   }
 
@@ -283,13 +285,13 @@ abstract class MessageTransportBase extends AbstractMessageTransport implements 
     if (isSameConnection) {
       boolean forcedDisconnect = false;
       synchronized (status) {
-        getLogger().warn("CLOSE EVENT : " + this.connection + ". STATUS : " + status);
-        if (status.isEstablished() || status.isDisconnected()) {
+        getLogger().debug("CLOSE EVENT : " + this.connection + ". STATUS : " + status);
+        if (status.isConnected() || status.isEstablished() || status.isDisconnected()) {
           if (status.isDisconnected()) forcedDisconnect = true;
           status.reset();
         } else {
           status.reset();
-          getLogger().warn("closing down connection - " + event);
+          getLogger().debug("closing down connection - " + event);
           return;
         }
       }
@@ -350,8 +352,6 @@ abstract class MessageTransportBase extends AbstractMessageTransport implements 
   }
 
   protected boolean wireNewConnection(TCConnection conn) {
-    getLogger().info("Attaching new connection: " + conn);
-
     synchronized (status) {
       if (this.status.isClosed()) {
         getLogger().warn("Connection stack is already closed. " + this.status + "; Conn: " + conn);
@@ -361,6 +361,10 @@ abstract class MessageTransportBase extends AbstractMessageTransport implements 
       } else {
         setConnection(conn);
         this.status.reset();
+        //  connection is already connected.  set proper status
+        if (conn.isConnected()) {
+          this.status.connected();
+        }
         return true;
       }
     }
@@ -396,8 +400,17 @@ abstract class MessageTransportBase extends AbstractMessageTransport implements 
   }
 
   @Override
-  public void initConnectionID(ConnectionID cid) {
+  public final void initConnectionID(ConnectionID cid) {
     connectionId = cid;
+  }
+  
+  void log(String msg) {
+    if (!getConnectionId().getProductId().isInternal()) {
+      getLogger().info(msg);
+    } else {
+      getLogger().debug(msg);
+    }
+
   }
 
 }

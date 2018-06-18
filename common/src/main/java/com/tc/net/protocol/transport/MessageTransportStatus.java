@@ -18,14 +18,15 @@
  */
 package com.tc.net.protocol.transport;
 
-import com.tc.logging.TCLogger;
+import org.slf4j.Logger;
+
 import com.tc.util.Assert;
 
 class MessageTransportStatus {
   private MessageTransportState state;
-  private final TCLogger              logger;
+  private final Logger logger;
 
-  MessageTransportStatus(MessageTransportState initialState, TCLogger logger) {
+  MessageTransportStatus(MessageTransportState initialState, Logger logger) {
     this.state = initialState;
     this.logger = logger;
   }
@@ -64,6 +65,10 @@ class MessageTransportStatus {
   void closed() {
     stateChange(MessageTransportState.STATE_CLOSED);
   }
+  
+  void connected() {
+    stateChange(MessageTransportState.STATE_CONNECTED);
+  }
 
   void disconnect() {
     stateChange(MessageTransportState.STATE_DISCONNECTED);
@@ -99,6 +104,10 @@ class MessageTransportStatus {
   
   boolean isClosed() {
     return checkState(MessageTransportState.STATE_CLOSED);
+  }
+  
+  boolean isConnected() {
+    return checkState(MessageTransportState.STATE_CONNECTED);
   }
 
   synchronized boolean isEnd() {

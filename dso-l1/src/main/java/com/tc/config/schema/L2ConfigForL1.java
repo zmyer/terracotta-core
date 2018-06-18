@@ -19,35 +19,40 @@
 package com.tc.config.schema;
 
 import com.tc.util.Assert;
+import java.net.InetSocketAddress;
 
 /**
  * Contains the information from the L2s that L1 needs.
  */
 public interface L2ConfigForL1 {
-  public static class L2Data {
-    private final String  host;
-    private final int     tsaPort;
-    private int           groupId = -1;
-    private String        groupName;
-    private final boolean secure;
+  public static final int DEFAULT_PORT = 9410;
 
-    public L2Data(String host, int tsaPort) {
-      this(host, tsaPort, false);
+  public static class L2Data {
+  private final InetSocketAddress  address;
+  private int           groupId = -1;
+  private final boolean secure;
+    
+
+    public L2Data(InetSocketAddress host) {
+      this(host, false);
     }
 
-    public L2Data(String host, int tsaPort, boolean secure) {
-      Assert.assertNotBlank(host);
-      this.host = host;
-      this.tsaPort = tsaPort;
+    public L2Data(InetSocketAddress host, boolean secure) {
+      Assert.assertNotNull(host);
+      this.address = host.getPort() <= 0 ? InetSocketAddress.createUnresolved(host.getHostString(), DEFAULT_PORT) : host;
       this.secure = secure;
     }
 
     public String host() {
-      return this.host;
+      return this.address.getHostString();
     }
 
     public int tsaPort() {
-      return this.tsaPort;
+      return this.address.getPort();
+    }
+    
+    public InetSocketAddress address() {
+      return this.address;
     }
 
     public boolean secure() {
@@ -64,24 +69,12 @@ public interface L2ConfigForL1 {
       return groupId;
     }
 
-    public void setGroupName(String groupName) {
-      this.groupName = groupName;
-    }
-
-    /**
-     * This function could return null if no group name is specified in the tc config file
-     */
-    public String getGroupName() {
-      return groupName;
-    }
-
     @Override
     public int hashCode() {
       final int prime = 31;
       int result = 1;
       result = prime * result + groupId;
-      result = prime * result + ((host == null) ? 0 : host.hashCode());
-      result = prime * result + tsaPort;
+      result = prime * result + this.address.hashCode();
       return result;
     }
 
@@ -92,21 +85,16 @@ public interface L2ConfigForL1 {
       if (getClass() != obj.getClass()) return false;
       L2Data other = (L2Data) obj;
       if (groupId != other.groupId) return false;
-      if (host == null) {
-        if (other.host != null) return false;
-      } else if (!host.equals(other.host)) return false;
-      if (tsaPort != other.tsaPort) return false;
+      if (!address.equals(other.address)) return false;
       return true;
     }
 
     @Override
     public String toString() {
-      return "L2Data [host=" + host + ", tsaPort=" + tsaPort + "]";
+      return "L2Data [address=" + address + "]";
     }
   }
 
   L2Data[] l2Data();
-
-  L2Data[][] getL2DataByGroup();
 
 }

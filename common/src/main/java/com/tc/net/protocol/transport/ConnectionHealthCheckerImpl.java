@@ -18,15 +18,14 @@
  */
 package com.tc.net.protocol.transport;
 
-import com.tc.logging.LogLevels;
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.tc.net.TCSocketAddress;
 import com.tc.net.core.TCConnection;
 import com.tc.net.core.TCConnectionManager;
 import com.tc.util.Assert;
 import com.tc.util.concurrent.SetOnceFlag;
-import com.tc.util.concurrent.ThreadUtil;
 
 import java.util.Iterator;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,7 +40,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class ConnectionHealthCheckerImpl implements ConnectionHealthChecker {
 
-  private final TCLogger                         logger;
+  private final Logger logger;
   private final Thread                           monitorThread;
   private final HealthCheckerMonitorThreadEngine monitorThreadEngine;
 
@@ -51,9 +50,8 @@ public class ConnectionHealthCheckerImpl implements ConnectionHealthChecker {
   public ConnectionHealthCheckerImpl(HealthCheckerConfig healthCheckerConfig, TCConnectionManager connManager) {
     Assert.assertNotNull(healthCheckerConfig);
     Assert.eval(healthCheckerConfig.isHealthCheckerEnabled());
-    logger = TCLogging.getLogger(ConnectionHealthCheckerImpl.class.getName() + ": "
-                                 + healthCheckerConfig.getHealthCheckerName());
-    logger.setLevel(LogLevels.DEBUG);
+    logger = LoggerFactory.getLogger(ConnectionHealthCheckerImpl.class.getName() + ": "
+                                     + healthCheckerConfig.getHealthCheckerName());
     monitorThreadEngine = getHealthMonitorThreadEngine(healthCheckerConfig, connManager, logger);
     monitorThread = new Thread(monitorThreadEngine, "HealthChecker");
     monitorThread.setDaemon(true);
@@ -61,7 +59,7 @@ public class ConnectionHealthCheckerImpl implements ConnectionHealthChecker {
 
   protected HealthCheckerMonitorThreadEngine getHealthMonitorThreadEngine(HealthCheckerConfig config,
                                                                           TCConnectionManager connectionManager,
-                                                                          TCLogger loger) {
+                                                                          Logger loger) {
     return new HealthCheckerMonitorThreadEngine(config, connectionManager, loger);
   }
 
@@ -81,9 +79,9 @@ public class ConnectionHealthCheckerImpl implements ConnectionHealthChecker {
       monitorThreadEngine.stop();
 // don't bother to join the monitorThread here.  shutdown should take care of all the 
 // threads in the thread group
-      logger.info("HealthChecker STOP requested");
+      logger.debug("HealthChecker STOP requested");
     } else {
-      logger.info("HealthChecker STOP already requested");
+      logger.warn("HealthChecker STOP already requested");
     }
   }
 
@@ -146,12 +144,12 @@ public class ConnectionHealthCheckerImpl implements ConnectionHealthChecker {
     private final long                checkTimeInterval;
     private final SetOnceFlag         stop          = new SetOnceFlag();
     private final HealthCheckerConfig config;
-    private final TCLogger            logger;
+    private final Logger logger;
     private final TCConnectionManager connectionManager;
     private final AtomicLong          lastCheckTime = new AtomicLong(System.currentTimeMillis());
 
     public HealthCheckerMonitorThreadEngine(HealthCheckerConfig healthCheckerConfig,
-                                            TCConnectionManager connectionManager, TCLogger logger) {
+                                            TCConnectionManager connectionManager, Logger logger) {
       this.pingIdleTime = healthCheckerConfig.getPingIdleTimeMillis();
       this.pingInterval = healthCheckerConfig.getPingIntervalMillis();
       this.pingProbes = healthCheckerConfig.getPingProbes();

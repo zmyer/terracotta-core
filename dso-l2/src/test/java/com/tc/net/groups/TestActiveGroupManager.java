@@ -23,7 +23,9 @@ import com.tc.config.NodesStore;
 import com.tc.net.NodeID;
 import com.tc.net.ServerID;
 import com.tc.text.PrettyPrinter;
+import com.tc.util.Assert;
 import com.tc.util.UUID;
+import java.util.Collections;
 
 import java.util.LinkedList;
 import java.util.List;
@@ -105,6 +107,11 @@ public class TestActiveGroupManager implements GroupManager<GroupMessage> {
   }
 
   @Override
+  public void sendToWithSentCallback(NodeID node, GroupMessage msg, Runnable sentCallback) throws GroupException {
+    Assert.fail("NOT CALLED IN CURRENT TESTS");
+  }
+
+  @Override
   public GroupMessage sendToAndWaitForResponse(NodeID nodeID, GroupMessage msg) {
     throw new UnsupportedOperationException();
   }
@@ -177,7 +184,7 @@ public class TestActiveGroupManager implements GroupManager<GroupMessage> {
   }
 
   @Override
-  public PrettyPrinter prettyPrint(PrettyPrinter out) {
-    throw new UnsupportedOperationException();
+  public Map<String, ?> getStateMap() {
+    return Collections.emptyMap();
   }
 }

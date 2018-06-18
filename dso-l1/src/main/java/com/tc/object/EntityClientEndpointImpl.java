@@ -34,35 +34,64 @@ import org.terracotta.exception.EntityException;
 
 import java.util.EnumSet;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import org.terracotta.entity.InvokeMonitor;
 
 
 public class EntityClientEndpointImpl<M extends EntityMessage, R extends EntityResponse> implements EntityClientEndpoint<M, R> {
   private final InvocationHandler invocationHandler;
   private final byte[] configuration;
-  private final EntityDescriptor entityDescriptor;
+  private final EntityDescriptor invokeDescriptor;
+  private final EntityID entityID;
+  private final long version;
   private final MessageCodec<M, R> codec;
   private final Runnable closeHook;
-  private EndpointDelegate delegate;
+  private final ExecutorService closer;
+  private EndpointDelegate<R> delegate;
   private boolean isOpen;
+  private Future<Void> releaseFuture;
 
   /**
-   * @param entityDescriptor The server-side entity and corresponding client-side instance ID.
+   * @param eid The type name name of the target entity
+   * @param version the version of the entity targeted
+   * @param instance the combination of the FetchID from the server and the ClientInstanceID from the client
    * @param invocationHandler Called to handle "invokeAction" requests made on this end-point.
    * @param entityConfiguration Opaque byte[] describing how to configure the entity to be built on top of this end-point.
    * @param closeHook A Runnable which will be run last when the end-point is closed.
    */
-  public EntityClientEndpointImpl(EntityDescriptor entityDescriptor, InvocationHandler invocationHandler, byte[] entityConfiguration, MessageCodec<M, R> codec, Runnable closeHook) {
-    this.entityDescriptor = entityDescriptor;
+  public EntityClientEndpointImpl(EntityID eid, long version, EntityDescriptor instance, InvocationHandler invocationHandler, byte[] entityConfiguration, MessageCodec<M, R> codec, Runnable closeHook, ExecutorService closer) {
+    this.entityID = eid;
+    this.version = version;
+    this.invokeDescriptor = instance;
     this.invocationHandler = invocationHandler;
     this.configuration = entityConfiguration;
     this.codec = codec;
-    Assert.assertNotNull("Endpoint didn't have close hook", closeHook);
     this.closeHook = closeHook;
+    this.closer = closer;
     // We start in the open state.
     this.isOpen = true;
   }
+  
+  EntityID getEntityID() {
+    return this.entityID;
+  }
+  
+  long getVersion() {
+    return this.version;
+  }
+  
+  EntityDescriptor getEntityDescriptor() {
+    return this.invokeDescriptor;
+  }
+  
+  
 
   @Override
   public byte[] getEntityConfiguration() {
@@ -72,7 +101,7 @@ public class EntityClientEndpointImpl<M extends EntityMessage, R extends EntityR
   }
 
   @Override
-  public void setDelegate(EndpointDelegate delegate) {
+  public void setDelegate(EndpointDelegate<R> delegate) {
     // This is harmless while closed but shouldn't be called so check open.
     checkEndpointOpen();
     Assert.assertNull(this.delegate);
@@ -102,6 +131,9 @@ public class EntityClientEndpointImpl<M extends EntityMessage, R extends EntityR
     private boolean requiresReplication = true;
     // By default, we block the get() on the RETIRE ack.
     private boolean shouldBlockGetOnRetire = true;
+    private InvokeMonitor<R> monitor;
+    private Executor executor;
+    private boolean deferred;
 
     // TODO: fill in durability/consistency options here.
 
@@ -126,7 +158,7 @@ public class EntityClientEndpointImpl<M extends EntityMessage, R extends EntityR
 
     @Override
     public InvocationBuilder<M, R> ackCompleted() {
-      acks.add(VoltronEntityMessage.Acks.APPLIED);
+      acks.add(VoltronEntityMessage.Acks.COMPLETED);
       return this;
     }
 
@@ -135,6 +167,24 @@ public class EntityClientEndpointImpl<M extends EntityMessage, R extends EntityR
       acks.add(VoltronEntityMessage.Acks.RETIRED);
       return this;
     }
+
+    @Override
+    public InvocationBuilder<M, R> monitor(InvokeMonitor<R> consumer) {
+      this.monitor = consumer;
+      return this;
+    }
+
+    @Override
+    public InvocationBuilder<M, R> withExecutor(Executor useForDelivery) {
+      this.executor = useForDelivery;
+      return this;
+    }
+    
+    @Override
+    public InvocationBuilder<M, R> asDeferredResponse() {
+      this.deferred = true;
+      return this;
+    }    
 
     @Override
     public InvocationBuilder<M, R> replicate(boolean requiresReplication) {
@@ -147,22 +197,18 @@ public class EntityClientEndpointImpl<M extends EntityMessage, R extends EntityR
       this.shouldBlockGetOnRetire = shouldBlock;
       return this;
     }
-
-    @Override
-    public synchronized InvokeFuture<R> invoke() throws MessageCodecException {
-      checkInvoked();
-      invoked = true;
-      final InvokeFuture<byte[]> invokeFuture = invocationHandler.invokeAction(entityDescriptor, this.acks, this.requiresReplication, this.shouldBlockGetOnRetire, codec.encodeMessage(request));
-      return new InvokeFuture<R>() {
+    
+    private InvokeFuture<R> returnTypedInvoke(final InFlightMessage result) {
+    return new InvokeFuture<R>() {
         @Override
         public boolean isDone() {
-          return invokeFuture.isDone();
+          return result.isDone();
         }
 
         @Override
         public R get() throws InterruptedException, EntityException {
           try {
-            return codec.decodeResponse(invokeFuture.get());
+            return codec.decodeResponse(result.get());
           } catch (MessageCodecException e) {
             throw new RuntimeException(e);
           }
@@ -171,7 +217,7 @@ public class EntityClientEndpointImpl<M extends EntityMessage, R extends EntityR
         @Override
         public R getWithTimeout(long timeout, TimeUnit unit) throws InterruptedException, EntityException, TimeoutException {
           try {
-            return codec.decodeResponse(invokeFuture.getWithTimeout(timeout, unit));
+            return codec.decodeResponse(result.getWithTimeout(timeout, unit));
           } catch (MessageCodecException e) {
             throw new RuntimeException(e);
           }
@@ -179,9 +225,26 @@ public class EntityClientEndpointImpl<M extends EntityMessage, R extends EntityR
 
         @Override
         public void interrupt() {
-          invokeFuture.interrupt();
+          result.interrupt();
         }
       };
+    }
+    
+    @Override
+    public synchronized InvokeFuture<R> invokeWithTimeout(long time, TimeUnit units) throws MessageCodecException, InterruptedException, TimeoutException {
+      checkInvoked();
+      invoked = true;
+      InFlightMonitor<R> ifm = (this.monitor != null) ? new InFlightMonitor<>(codec, this.monitor, executor) : null;
+      return returnTypedInvoke(invocationHandler.invokeActionWithTimeout(entityID, invokeDescriptor, this.acks, ifm, this.requiresReplication, this.shouldBlockGetOnRetire, this.deferred, time, units, codec.encodeMessage(request)));
+    }
+
+    @Override
+    public synchronized InvokeFuture<R> invoke() throws MessageCodecException {
+      checkInvoked();
+      invoked = true;
+      InFlightMonitor<R> ifm = (this.monitor != null) ? new InFlightMonitor<>(codec, this.monitor, executor) : null;
+      return returnTypedInvoke(invocationHandler.invokeAction(entityID, invokeDescriptor, this.acks, ifm, this.requiresReplication, this.shouldBlockGetOnRetire, this.deferred, codec.encodeMessage(request)));
+      
     }
 
     private void checkInvoked() {
@@ -191,7 +254,6 @@ public class EntityClientEndpointImpl<M extends EntityMessage, R extends EntityR
     }
   }
 
-  @Override
   public byte[] getExtendedReconnectData() {
     // TODO:  Determine if we need to limit anything here on closed.  The call can come from another thread so it may not
     // yet know that we are closed when the call originated.
@@ -209,12 +271,38 @@ public class EntityClientEndpointImpl<M extends EntityMessage, R extends EntityR
   public void close() {
     // We can't close twice.
     checkEndpointOpen();
-    this.closeHook.run();
+    if (this.closeHook != null) {
+      this.closeHook.run();
+    }
     // We also need to invalidate ourselves so we don't continue allowing new messages through when disconnecting.
     this.isOpen = false;
   }
 
   @Override
+  public synchronized Future<Void> release() {
+    if (releaseFuture == null) {
+      Callable<Void> call = new Callable<Void>() {
+        @Override
+        public Void call() throws Exception {
+          close();
+          return null;
+        }
+      };
+      if (this.closer == null) {
+        close();
+        releaseFuture = new CompletedFuture();
+      } else {
+        try {
+          releaseFuture = this.closer.submit(call);
+        } catch (RejectedExecutionException re) {
+          // connection already shutdown
+          releaseFuture = new CompletedFuture(new IllegalStateException("connection has already been shutdown"));
+        }
+      }
+    }
+    return releaseFuture;
+  }
+
   public void didCloseUnexpectedly() {
     // TODO:  Determine if we need to limit anything here on closed.  The call can come from another thread so it may not
     // yet know that we are closed when the call originated.
@@ -230,4 +318,45 @@ public class EntityClientEndpointImpl<M extends EntityMessage, R extends EntityR
       throw new IllegalStateException("Endpoint closed");
     }
   }
+  
+  private static class CompletedFuture implements Future<Void> {
+    public final Exception failure;
+
+    public CompletedFuture() {
+      this.failure = null;
+    }
+
+    public CompletedFuture(Exception failure) {
+      this.failure = failure;
+    }
+    
+    @Override
+    public boolean cancel(boolean mayInterruptIfRunning) {
+      return false;
+    }
+
+    @Override
+    public boolean isCancelled() {
+      return false;
+    }
+
+    @Override
+    public boolean isDone() {
+      return true;
+    }
+
+    @Override
+    public Void get() throws InterruptedException, ExecutionException {
+      if (failure != null) {
+        throw new ExecutionException(failure);
+      } else {
+        return null;
+      }
+    }
+
+    @Override
+    public Void get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
+      return get();
+    }
+  };
 }

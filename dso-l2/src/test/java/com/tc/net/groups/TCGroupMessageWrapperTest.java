@@ -24,7 +24,6 @@ import com.tc.l2.msg.L2StateMessage;
 import com.tc.l2.state.Enrollment;
 import com.tc.net.ServerID;
 import com.tc.net.TCSocketAddress;
-import com.tc.net.core.ConnectionAddressProvider;
 import com.tc.net.core.ConnectionInfo;
 import com.tc.net.protocol.PlainNetworkStackHarnessFactory;
 import com.tc.net.protocol.tcm.ChannelManager;
@@ -42,12 +41,12 @@ import com.tc.net.protocol.tcm.TCMessageRouterImpl;
 import com.tc.net.protocol.tcm.TCMessageSink;
 import com.tc.net.protocol.tcm.TCMessageType;
 import com.tc.net.protocol.tcm.UnsupportedMessageTypeException;
-import com.tc.net.protocol.transport.ConnectionID;
 import com.tc.net.protocol.transport.DefaultConnectionIdFactory;
 import com.tc.net.protocol.transport.DisabledHealthCheckerConfigImpl;
 import com.tc.net.protocol.transport.NullConnectionPolicy;
 import com.tc.net.protocol.transport.TransportHandshakeErrorNullHandler;
 import com.tc.object.session.NullSessionManager;
+import com.tc.util.ProductID;
 import com.tc.util.State;
 import com.tc.util.UUID;
 
@@ -86,12 +85,12 @@ public class TCGroupMessageWrapperTest extends TestCase {
                                                 new PlainNetworkStackHarnessFactory(), null,
                                                 new NullConnectionPolicy(), 0, new DisabledHealthCheckerConfigImpl(),
                                                 new TransportHandshakeErrorNullHandler(),  Collections.emptyMap(),
-                                                Collections.emptyMap(), null);
+                                                Collections.emptyMap());
     serverComms = new CommunicationsManagerImpl("TestCommsMgr-Server", monitor, new TCMessageRouterImpl(),
                                                 new PlainNetworkStackHarnessFactory(), null,
                                                 new NullConnectionPolicy(), 0, new DisabledHealthCheckerConfigImpl(),
                                                 new TransportHandshakeErrorNullHandler(),  Collections.emptyMap(),
-                                                Collections.emptyMap(), null);
+                                                Collections.emptyMap());
   }
 
   @Override
@@ -133,11 +132,10 @@ public class TCGroupMessageWrapperTest extends TestCase {
                                                                                       }
                                                                                     }
                                                                                   });
-    NetworkListener lsnr = serverComms.createListener(sessionManager,
-                                                      new TCSocketAddress(TCSocketAddress.LOOPBACK_ADDR, 0), true,
-                                                      new DefaultConnectionIdFactory());
+    NetworkListener lsnr = serverComms.createListener(new TCSocketAddress(TCSocketAddress.LOOPBACK_ADDR, 0), true,
+                                                      new DefaultConnectionIdFactory(), (t)->true);
 
-    lsnr.start(new HashSet<ConnectionID>());
+    lsnr.start(new HashSet<>());
     return (lsnr);
   }
 
@@ -145,14 +143,9 @@ public class TCGroupMessageWrapperTest extends TestCase {
     ClientMessageChannel channel;
     clientComms.addClassMapping(TCMessageType.GROUP_WRAPPER_MESSAGE, TCGroupMessageWrapper.class);
     channel = clientComms
-        .createClientChannel(sessionManager,
-                             0,
-                             TCSocketAddress.LOOPBACK_IP,
-                             lsnr.getBindPort(),
-                             3000,
-                             new ConnectionAddressProvider(new ConnectionInfo[] { new ConnectionInfo(LOCALHOST, lsnr
-                                 .getBindPort()) }));
-    channel.open();
+        .createClientChannel(ProductID.SERVER, sessionManager,
+                             3000);
+    channel.open(Collections.singleton(new ConnectionInfo(LOCALHOST, lsnr.getBindPort())));
 
     assertTrue(channel.isConnected());
 

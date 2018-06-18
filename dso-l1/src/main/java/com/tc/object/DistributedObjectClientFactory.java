@@ -25,47 +25,40 @@ import com.tc.config.schema.setup.ConfigurationSetupException;
 import com.tc.config.schema.setup.L1ConfigurationSetupManager;
 import com.tc.lang.L1ThrowableHandler;
 import com.tc.lang.TCThreadGroup;
-import com.tc.util.ProductID;
-import com.tc.logging.TCLogging;
-import com.tc.net.core.SecurityInfo;
-import com.tc.net.core.security.TCSecurityManager;
 import com.tc.object.config.ClientConfig;
 import com.tc.object.config.ClientConfigImpl;
 import com.tc.object.config.PreparedComponentsFromL2Connection;
 import com.tc.util.UUID;
-import com.tcclient.cluster.ClusterInternal;
+import com.tc.cluster.ClusterInternal;
+import java.net.InetSocketAddress;
 
 import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+
+import org.slf4j.LoggerFactory;
 import org.terracotta.connection.ConnectionPropertyNames;
 
 public class DistributedObjectClientFactory {
-  private final List<String> stripeMemberUris;
-  private final TCSecurityManager securityManager;
-  private final SecurityInfo      securityInfo;
-  private final ProductID         productId;
+  private final List<InetSocketAddress> stripeMemberUris;
+  private final ClientBuilder builder;
   private final Properties        properties;
 
-  public DistributedObjectClientFactory(List<String> stripeMemberUris, TCSecurityManager securityManager,
-                                        SecurityInfo securityInfo, 
-                                        ProductID productId,
+  public DistributedObjectClientFactory(List<InetSocketAddress> stripeMemberUris, ClientBuilder builder,
                                         Properties properties) {
     this.stripeMemberUris = stripeMemberUris;
-    this.securityManager = securityManager;
-    this.securityInfo = securityInfo;
-    this.productId = productId;
+    this.builder = builder;
     this.properties = properties;
   }
 
   public DistributedObjectClient create() throws InterruptedException, ConfigurationSetupException {
     final AtomicReference<DistributedObjectClient> clientRef = new AtomicReference<DistributedObjectClient>();
 
-    ClientConfigurationSetupManagerFactory factory = new ClientConfigurationSetupManagerFactory(null, this.stripeMemberUris, securityManager);
+    ClientConfigurationSetupManagerFactory factory = new ClientConfigurationSetupManagerFactory(null, this.stripeMemberUris);
 
-    L1ConfigurationSetupManager config = factory.getL1TVSConfigurationSetupManager(securityInfo);
+    L1ConfigurationSetupManager config = factory.getL1TVSConfigurationSetupManager();
 
     final PreparedComponentsFromL2Connection connectionComponents;
     try {
@@ -73,9 +66,8 @@ public class DistributedObjectClientFactory {
     } catch (Exception e) {
       throw new ConfigurationSetupException(e.getLocalizedMessage(), e);
     }
-
     final ClientConfig configHelper = new ClientConfigImpl(config);
-    L1ThrowableHandler throwableHandler = new L1ThrowableHandler(TCLogging.getLogger(DistributedObjectClient.class),
+    L1ThrowableHandler throwableHandler = new L1ThrowableHandler(LoggerFactory.getLogger(DistributedObjectClient.class),
                                                                  new Callable<Void>() {
 
                                                                    @Override
@@ -94,15 +86,15 @@ public class DistributedObjectClientFactory {
     String uuid = this.properties.getProperty(ConnectionPropertyNames.CONNECTION_UUID, UUID.getUUID().toString());
     String name = this.properties.getProperty(ConnectionPropertyNames.CONNECTION_NAME, "");
     
-    DistributedObjectClient client = ClientFactory.createClient(configHelper, group, connectionComponents, cluster, securityManager,
+    
+    DistributedObjectClient client = ClientFactory.createClient(configHelper, builder, group, connectionComponents, cluster,
         uuid,
-        name,
-        productId);
+        name);
 
     try {
       client.start();
       String timeout = properties.getProperty(ConnectionPropertyNames.CONNECTION_TIMEOUT, "0");
-      if (!client.waitForConnection(Integer.parseInt(timeout), TimeUnit.MILLISECONDS)) {
+      if (!client.waitForConnection(Long.parseLong(timeout), TimeUnit.MILLISECONDS)) {
 //  timed out, shutdown the extra threads and return null;
         client.shutdown();
         return null;

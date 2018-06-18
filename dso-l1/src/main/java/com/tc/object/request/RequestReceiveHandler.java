@@ -22,6 +22,7 @@ package com.tc.object.request;
 import org.terracotta.exception.EntityException;
 import com.tc.async.api.AbstractEventHandler;
 import com.tc.async.api.EventHandlerException;
+import com.tc.entity.DiagnosticResponse;
 import com.tc.entity.VoltronEntityAppliedResponse;
 import com.tc.entity.VoltronEntityResponse;
 import com.tc.object.tx.TransactionID;
@@ -43,15 +44,18 @@ public class RequestReceiveHandler extends AbstractEventHandler<VoltronEntityRes
         case RETIRED:
           this.handler.retired(transactionID);
           break;
-        case APPLIED:
-          VoltronEntityAppliedResponse appliedResponse = (VoltronEntityAppliedResponse) response;
-          EntityException failureException = appliedResponse.getFailureException();
-          if (failureException != null) {
-            this.handler.failed(transactionID, failureException);
+        case COMPLETED:
+          if (response instanceof DiagnosticResponse) {
+            this.handler.complete(transactionID, ((DiagnosticResponse)response).getResponse());
           } else {
-            this.handler.complete(transactionID, appliedResponse.getSuccessValue());
-          }
-          if (appliedResponse.alsoRetire()) {
+            VoltronEntityAppliedResponse appliedResponse = (VoltronEntityAppliedResponse) response;
+            EntityException failureException = appliedResponse.getFailureException();
+            if (failureException != null) {
+              this.handler.failed(transactionID, failureException);
+            } else {
+              this.handler.complete(transactionID, appliedResponse.getSuccessValue());
+            }
+            // always retire single use messages
             this.handler.retired(transactionID);
           }
           break;

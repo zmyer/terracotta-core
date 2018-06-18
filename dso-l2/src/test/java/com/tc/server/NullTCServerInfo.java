@@ -120,6 +120,16 @@ public class NullTCServerInfo extends AbstractTerracottaMBean implements TCServe
   }
 
   @Override
+  public boolean isReconnectWindow() {
+    return false;
+  }
+
+  @Override
+  public int getReconnectWindowTimeout() {
+    return 0;
+  }
+
+  @Override
   public void shutdown() {
     //
   }
@@ -141,11 +151,6 @@ public class NullTCServerInfo extends AbstractTerracottaMBean implements TCServe
 
   @Override
   public boolean isPassiveUninitialized() {
-    return false;
-  }
-
-  @Override
-  public boolean isRecovering() {
     return false;
   }
 
@@ -190,7 +195,7 @@ public class NullTCServerInfo extends AbstractTerracottaMBean implements TCServe
   }
 
   @Override
-  public ServerGroupInfo[] getServerGroupInfo() {
+  public ServerGroupInfo getStripeInfo() {
     return null;
   }
 
@@ -215,10 +220,10 @@ public class NullTCServerInfo extends AbstractTerracottaMBean implements TCServe
   }
 
   @Override
-  public boolean isEnterprise() {
-    return false;
+  public void setPipelineMonitoring(boolean monitor) {
+    /**/
   }
-
+  
   @Override
   public String getTCProperties() {
     return null;
@@ -230,62 +235,7 @@ public class NullTCServerInfo extends AbstractTerracottaMBean implements TCServe
   }
 
   @Override
-  public boolean isSecure() {
-    return false;
-  }
-
-  @Override
-  public String getSecurityServiceLocation() {
-    return null;
-  }
-
-  @Override
-  public Integer getSecurityServiceTimeout() {
-    return null;
-  }
-
-  @Override
-  public String getSecurityHostname() {
-    return null;
-  }
-
-  @Override
-  public String getIntraL2Username() {
-    return null;
-  }
-
-  @Override
-  public void backup(String name) {
-    //
-  }
-
-  @Override
-  public String getRunningBackup() {
-    return null;
-  }
-
-  @Override
-  public String getBackupStatus(String name) {
-    return BackupManager.BackupStatus.UNKNOWN.toString();
-  }
-
-  @Override
-  public String getBackupFailureReason(String name) {
-    return null;
-  }
-
-  @Override
   public String getResourceState() {
     return "";
-  }
-
-  @Override
-  public Map<String, String> getBackupStatuses() {
-    return null;
-  }
-
-  @Override
-  public boolean isLegacyProductionModeEnabled() {
-    return false;
   }
 }

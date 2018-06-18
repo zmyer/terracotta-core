@@ -48,7 +48,10 @@ public interface TCPropertiesConsts {
    * </code>
    ********************************************************************************************************************/
   public static final String ENTITY_PROCESSOR_THREADS                                    = "server.entity.processor.threads";
+  public static final String MIN_ENTITY_PROCESSOR_THREADS                                    = "server.entity.processor.minthreads";
   public static final String L2_SEDA_STAGE_SINK_CAPACITY                                    = "l2.seda.stage.sink.capacity";
+  public static final String L2_SEDA_STAGE_DISABLE_DIRECT_SINKS                                    = "l2.seda.stage.sink.disable.direct";
+  public static final String L2_SEDA_STAGE_SINGLE_THREAD                                    = "l2.seda.stage.single.thread";
   String L2_TCCOM_WORKERTHREADS                                                          = "l2.tccom.workerthreads";
   String L2_SEDA_STAGE_WORKERTHREADS                                                     = "l2.seda.stage.workerthreads";
 
@@ -125,7 +128,6 @@ public interface TCPropertiesConsts {
   public static final String L1_TRANSACTIONMANAGER_STRINGS_COMPRESS_MINSIZE                 = "l1.transactionmanager.strings.compress.minSize";
   
   public static final String CLIENT_MAX_PENDING_REQUESTS                                    = "client.requests.pending.max";
-  public static final String CLIENT_MAX_SENT_REQUESTS                                       = "client.requests.sent.max";
 
   public static final String TC_TRANSPORT_HANDSHAKE_TIMEOUT                                 = "tc.transport.handshake.timeout";
   public static final String TC_CONFIG_SOURCEGET_TIMEOUT                                    = "tc.config.getFromSource.timeout";
@@ -189,9 +191,6 @@ public interface TCPropertiesConsts {
    ********************************************************************************************************************/
   public static final String TC_STAGE_MONITOR_ENABLED                                       = "tc.stage.monitor.enabled";
   public static final String TC_STAGE_MONITOR_DELAY                                         = "tc.stage.monitor.delay";
-  public static final String TC_BYTEBUFFER_POOLING_ENABLED                                  = "tc.bytebuffer.pooling.enabled";
-  public static final String TC_BYTEBUFFER_COMMON_POOL_MAXCOUNT                             = "tc.bytebuffer.common.pool.maxcount";
-  public static final String TC_BYTEBUFFER_THREADLOCAL_POOL_MAXCOUNT                        = "tc.bytebuffer.threadlocal.pool.maxcount";
   public static final String TC_MESSAGE_GROUPING_ENABLED                                    = "tc.messages.grouping.enabled";
   public static final String TC_MESSAGE_GROUPING_MAXSIZE_KB                                 = "tc.messages.grouping.maxSizeKiloBytes";
   public static final String TC_MESSAGE_PACKUP_ENABLED                                      = "tc.messages.packup.enabled";
@@ -282,16 +281,6 @@ public interface TCPropertiesConsts {
    *                         successful socket connects
    * </code>
    ********************************************************************************************************************/
-  public static final String L2_HEALTHCHECK_L1_PING_ENABLED                                 = "l2.healthcheck.l1.ping.enabled";
-  public static final String L2_HEALTHCHECK_L1_PING_IDLETIME                                = "l2.healthcheck.l1.ping.idletime";
-  public static final String L2_HEALTHCHECK_L1_PING_INTERVAL                                = "l2.healthcheck.l1.ping.interval";
-  public static final String L2_HEALTHCHECK_L1_PING_PROBES                                  = "l2.healthcheck.l1.ping.probes";
-  public static final String L2_HEALTHCHECK_L1_SOCKECT_CONNECT                              = "l2.healthcheck.l1.socketConnect";
-  public static final String L2_HEALTHCHECK_L1_SOCKECT_CONNECT_TIMEOUT                      = "l2.healthcheck.l1.socketConnectTimeout";
-  public static final String L2_HEALTHCHECK_L1_SOCKECT_CONNECT_COUNT                        = "l2.healthcheck.l1.socketConnectCount";
-  public static final String L2_HEALTHCHECK_L1_CHECK_TIME_ENABLED                           = "l2.healthcheck.l1.checkTime.enabled";
-  public static final String L2_HEALTHCHECK_L1_CHECK_TIME_INTERVAL                          = "l2.healthcheck.l1.checkTime.interval";
-  public static final String L2_HEALTHCHECK_L1_CHECK_TIME_THRESHOLD                         = "l2.healthcheck.l1.checkTime.threshold";
 
   public static final String L2_HEALTHCHECK_L2_PING_ENABLED                                 = "l2.healthcheck.l2.ping.enabled";
   public static final String L2_HEALTHCHECK_L2_PING_IDLETIME                                = "l2.healthcheck.l2.ping.idletime";
@@ -304,8 +293,6 @@ public interface TCPropertiesConsts {
   public static final String L2_HEALTHCHECK_L2_CHECK_TIME_INTERVAL                          = "l2.healthcheck.l2.checkTime.interval";
   public static final String L2_HEALTHCHECK_L2_CHECK_TIME_THRESHOLD                         = "l2.healthcheck.l2.checkTime.threshold";
 
-  public static final String L1_HEALTHCHECK_L2_BIND_ADDRESS                                 = "l1.healthcheck.l2.bindAddress";
-  public static final String L1_HEALTHCHECK_L2_BIND_PORT                                    = "l1.healthcheck.l2.bindPort";
   public static final String L1_HEALTHCHECK_L2_PING_ENABLED                                 = "l1.healthcheck.l2.ping.enabled";
   public static final String L1_HEALTHCHECK_L2_PING_IDLETIME                                = "l1.healthcheck.l2.ping.idletime";
   public static final String L1_HEALTHCHECK_L2_PING_INTERVAL                                = "l1.healthcheck.l2.ping.interval";
@@ -335,15 +322,6 @@ public interface TCPropertiesConsts {
    ********************************************************************************************************************/
   public static final String STATS_PRINTER_INTERVAL                                         = "stats.printer.intervalInMillis";
 
-  /*********************************************************************************************************************
-   * <code>
-   * Section :  EnterpriseLicenseResovler
-   * license.path                                - path to license key
-   * </code>
-   ********************************************************************************************************************/
-  public static final String PRODUCTKEY_RESOURCE_PATH                                       = "productkey.resource.path";
-  public static final String PRODUCTKEY_PATH                                                = "productkey.path";
-  public static final String LICENSE_PATH                                                   = "license.path";
 
   /*********************************************************************************************************************
    * <code>
@@ -376,25 +354,6 @@ public interface TCPropertiesConsts {
   public static final String L1_SHUTDOWN_THREADGROUP_GRACETIME                              = "l1.shutdown.threadgroup.gracetime";
   public static final String L1_SHUTDOWN_FORCE_FINALIZATION                                 = "l1.shutdown.force.finalization";
 
- /*********************************************************************************************************************
-   * <code>
-   * Section :  Server Event settings
-   * </code>
-   ********************************************************************************************************************/
-  String                     L2_SERVER_EVENT_BATCHER_INTERVAL_MS                            = "l2.serverEvent.batcher.intervalInMillis";
-  String                     L2_SERVER_EVENT_BATCHER_QUEUE_SIZE                             = "l2.serverEvent.batcher.queueSize";
-  String                     L1_SERVER_EVENT_DELIVERY_THREADS                               = "l1.serverEvent.delivery.threads";
-  String                     L1_SERVER_EVENT_DELIVERY_QUEUE_SIZE                            = "l1.serverEvent.delivery.queueSize";
-  String                     L1_SERVER_EVENT_DELIVERY_TIMEOUT_INTERVAL                      = "l1.serverEvent.delivery.timeout.intervalInSec";
-
-  /*********************************************************************************************************************
-   * <code>
-   * Section :  Version Settings
-   * version.compatibility.check - check version compatibility for client<->server and server<-> connections
-   * </code>
-   ********************************************************************************************************************/
-  public static final String VERSION_COMPATIBILITY_CHECK                                    = "version.compatibility.check";
-
   /*********************************************************************************************************************
    * <code>
    * Section :  Some useful subcategories
@@ -409,5 +368,17 @@ public interface TCPropertiesConsts {
   public static final String  L1_LOCK_MANAGER_CATEGORY                                      = "l1.lockmanager";
   public static final String  LOGGING_CATEGORY                                              = "logging";
   public static final String  NETCORE_CATEGORY                                              = "net.core";
+
+  String[] TC_PROPERTIES_WITH_NO_DEFAULTS = {
+      ENTITY_PROCESSOR_THREADS,
+      L2_TCCOM_WORKERTHREADS,
+      L2_SEDA_STAGE_WORKERTHREADS,
+      L2_SEDA_STAGE_DISABLE_DIRECT_SINKS,
+      L2_SEDA_STAGE_SINGLE_THREAD,
+      L2_NHA_TCGROUPCOMM_RECONNECT_L2PROXY_TO_PORT,
+      CLIENT_MAX_PENDING_REQUESTS,
+      L1_CLUSTEREVENT_EXECUTOR_MAX_THREADS,
+      L1_CLUSTEREVENT_EXECUTOR_MAX_WAIT_SECONDS
+  };
 
 }

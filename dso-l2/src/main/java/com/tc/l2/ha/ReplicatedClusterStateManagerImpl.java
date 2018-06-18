@@ -18,12 +18,13 @@
  */
 package com.tc.l2.ha;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.tc.exception.TCRuntimeException;
 import com.tc.l2.api.ReplicatedClusterStateManager;
 import com.tc.l2.msg.ClusterStateMessage;
 import com.tc.l2.state.StateManager;
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
 import com.tc.net.ClientID;
 import com.tc.net.NodeID;
 import com.tc.net.groups.AbstractGroupMessage;
@@ -35,19 +36,19 @@ import com.tc.net.protocol.transport.ConnectionID;
 import com.tc.net.protocol.transport.ConnectionIDFactory;
 import com.tc.net.protocol.transport.ConnectionIDFactoryListener;
 import com.tc.objectserver.handler.ChannelLifeCycleHandler;
-import com.tc.text.PrettyPrintable;
-import com.tc.text.PrettyPrinter;
 import com.tc.util.Assert;
 import com.tc.util.State;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 public class ReplicatedClusterStateManagerImpl implements ReplicatedClusterStateManager, GroupMessageListener<ClusterStateMessage>,
-    ConnectionIDFactoryListener, PrettyPrintable {
+    ConnectionIDFactoryListener {
 
-  private static final TCLogger logger   = TCLogging.getLogger(ReplicatedClusterStateManagerImpl.class);
+  private static final Logger logger = LoggerFactory.getLogger(ReplicatedClusterStateManagerImpl.class);
 
   private final GroupManager<AbstractGroupMessage>    groupManager;
   private final ClusterState    state;
@@ -194,7 +195,7 @@ public class ReplicatedClusterStateManagerImpl implements ReplicatedClusterState
       clm.clientCreated(nodeID, msg.getConnectionID().getProductId());
     } else if (msg.getType() == ClusterStateMessage.CONNECTION_DESTROYED) {
       ClientID nodeID = new ClientID(msg.getConnectionID().getChannelID());
-      clm.clientDropped(nodeID, msg.getConnectionID().getProductId());
+      clm.clientDropped(nodeID, msg.getConnectionID().getProductId(), false);
     }
   }
 
@@ -215,25 +216,16 @@ public class ReplicatedClusterStateManagerImpl implements ReplicatedClusterState
   }
 
   @Override
-  public void fireNodeLeftEvent(NodeID nodeID) {
-    // this is needed to clean up some data structures internally
-    if (nodeID instanceof ClientID) {
-      clm.clientDropped((ClientID)nodeID, null);
-    }
-  }
-
-  @Override
   public synchronized void setCurrentState(State currentState) {
     this.state.setCurrentState(currentState);
   }
 
   @Override
-  public synchronized PrettyPrinter prettyPrint(PrettyPrinter out) {
-    StringBuilder strBuilder = new StringBuilder();
-    strBuilder.append(ReplicatedClusterStateManagerImpl.class.getSimpleName() + " [ ");
-    strBuilder.append(this.state).append(" ").append(this.stateManager);
-    strBuilder.append(" ]");
-    out.indent().print(strBuilder.toString()).flush();
-    return out;
+  public void reportStateToMap(Map<String, Object> state) {
+    state.put("className", this.getClass().getName());
+    Map<String, Object> cstate = new LinkedHashMap<>();
+    state.put("state", cstate);
+    this.state.reportStateToMap(cstate);
+    state.put("stateManager", this.stateManager.toString());
   }
 }

@@ -20,6 +20,7 @@ package com.tc.net.protocol.transport;
 
 import com.tc.io.TCDataInput;
 import com.tc.io.TCDataOutput;
+import com.tc.net.ClientID;
 import com.tc.util.ProductID;
 import com.tc.net.protocol.tcm.ChannelID;
 
@@ -41,7 +42,7 @@ public class ConnectionID {
 
   private static final String      NULL_SERVER_ID = "ffffffffffffffffffffffffffffffff";
   public static final String       NULL_JVM_ID    = "ffffffffffffffffffffffffffffffffffffffffffffffff";
-  private static final ProductID   DEFAULT_PRODUCT_ID = ProductID.USER;
+  private static final ProductID   DEFAULT_PRODUCT_ID = ProductID.PERMANENT;
   public static final ConnectionID NULL_ID        = new ConnectionID(NULL_JVM_ID, ChannelID.NULL_ID.toLong(),
                                                                      NULL_SERVER_ID);
 
@@ -98,6 +99,10 @@ public class ConnectionID {
 
   public boolean isNull() {
     return NULL_ID.equals(this);
+  }
+  
+  public boolean isValid() {
+    return channelID >= 0;
   }
 
   public boolean isNewConnection() {
@@ -212,5 +217,13 @@ public class ConnectionID {
 
   public ProductID getProductId() {
     return productId;
+  }
+  
+  public ClientID getClientID() {
+    return new ClientID(channelID);
+  }
+  
+  public ConnectionID changeProductId(ProductID product) {
+    return new ConnectionID(jvmID, channelID, serverID, username, password, product);
   }
 }

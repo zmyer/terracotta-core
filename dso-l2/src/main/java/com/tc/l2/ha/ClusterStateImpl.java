@@ -18,30 +18,31 @@
  */
 package com.tc.l2.ha;
 
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
-import com.tc.net.GroupID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.tc.net.StripeID;
 import com.tc.net.groups.StripeIDStateManager;
 import com.tc.net.protocol.transport.ConnectionID;
 import com.tc.net.protocol.transport.ConnectionIDFactory;
-import com.tc.objectserver.persistence.ClusterStatePersistor;
-import com.tc.util.Assert;
+import com.tc.objectserver.api.ClientNotFoundException;
+import com.tc.objectserver.persistence.Persistor;
 import com.tc.util.State;
 import com.tc.util.UUID;
+import java.util.ArrayList;
 
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 public class ClusterStateImpl implements ClusterState {
 
-  private static final TCLogger                     logger                 = TCLogging.getLogger(ClusterState.class);
+  private static final Logger logger = LoggerFactory.getLogger(ClusterState.class);
 
-  private final ClusterStatePersistor               clusterStatePersistor;
+  private final Persistor               persistor;
   private final ConnectionIDFactory                 connectionIdFactory;
-  private final GroupID                             thisGroupID;
   private final StripeIDStateManager                stripeIDStateManager;
 
   private final Set<ConnectionID>                   connections            = Collections.synchronizedSet(new HashSet<ConnectionID>());
@@ -49,26 +50,13 @@ public class ClusterStateImpl implements ClusterState {
   private State                                     currentState;
   private StripeID                                  stripeID;
 
-  public ClusterStateImpl(ClusterStatePersistor clusterStatePersistor,
-                          ConnectionIDFactory connectionIdFactory,
-                          GroupID thisGroupID, StripeIDStateManager stripeIDStateManager) {
-    this.clusterStatePersistor = clusterStatePersistor;
+  public ClusterStateImpl(Persistor persistor, 
+                          ConnectionIDFactory connectionIdFactory, StripeIDStateManager stripeIDStateManager) {
+    this.persistor = persistor;
     this.connectionIdFactory = connectionIdFactory;
-    this.thisGroupID = thisGroupID;
     this.stripeIDStateManager = stripeIDStateManager;
-    this.stripeID = clusterStatePersistor.getThisStripeID();
+    this.stripeID = persistor.getClusterStatePersistor().getThisStripeID();
     this.nextAvailChannelID = this.connectionIdFactory.getCurrentConnectionID();
-    checkAndSetGroupID(clusterStatePersistor, thisGroupID);
-  }
-
-  private void checkAndSetGroupID(ClusterStatePersistor statePersistor, GroupID groupID) {
-    if (statePersistor.getGroupId().isNull()) {
-      statePersistor.setGroupId(thisGroupID);
-    } else if (!groupID.equals(statePersistor.getGroupId())) {
-      logger.error("Found data from the incorrect stripe in the server data path. Verify that the server is starting up " +
-                   "with the correct data files and that the cluster topology has not changed across a restart.");
-      throw new IllegalStateException("Data for " + statePersistor.getGroupId() + " found. Expected data from group " + thisGroupID + ".");
-    }
   }
 
   @Override
@@ -85,20 +73,18 @@ public class ClusterStateImpl implements ClusterState {
       return;
     }
     this.nextAvailChannelID = nextAvailableCID;
+    persistor.getClientStatePersistor().getConnectionIDSequence().setNext(nextAvailChannelID);
   }
 
   @Override
   public void syncActiveState() {
-    syncConnectionIDsToDisk();
+// activate the connection id factory so that it can be used to create connection ids
+// this happens for active only
+    connectionIdFactory.activate(stripeID, nextAvailChannelID);
   }
 
   @Override
   public void syncSequenceState() {
-  }
-
-  private void syncConnectionIDsToDisk() {
-    Assert.assertNotNull(stripeID);
-    connectionIdFactory.init(stripeID.getName(), nextAvailChannelID, connections);
   }
 
   @Override
@@ -120,11 +106,11 @@ public class ClusterStateImpl implements ClusterState {
     syncStripeIDToDB();
 
     // notify stripeIDStateManager
-    stripeIDStateManager.verifyOrSaveStripeID(thisGroupID, stripeID, true);
+    stripeIDStateManager.verifyOrSaveStripeID(stripeID, true);
   }
 
   private void syncStripeIDToDB() {
-    clusterStatePersistor.setThisStripeID(stripeID);
+    persistor.getClusterStatePersistor().setThisStripeID(stripeID);
   }
 
   @Override
@@ -134,22 +120,33 @@ public class ClusterStateImpl implements ClusterState {
   }
 
   private void syncCurrentStateToDB() {
-    clusterStatePersistor.setCurrentL2State(currentState);
+    persistor.getClusterStatePersistor().setCurrentL2State(currentState);
   }
 
   @Override
   public void addNewConnection(ConnectionID connID) {
     if (connID.getChannelID() >= nextAvailChannelID) {
       nextAvailChannelID = connID.getChannelID() + 1;
+      persistor.getClientStatePersistor().getConnectionIDSequence().setNext(nextAvailChannelID);
     }
     connections.add(connID);
+    if (connID.getProductId().isReconnectEnabled()) {
+      persistor.addClientState(connID.getClientID(), connID.getProductId());
+    }
   }
 
   @Override
   public void removeConnection(ConnectionID connectionID) {
     boolean removed = connections.remove(connectionID);
     if (!removed) {
-      logger.warn("Connection ID not found : " + connectionID + " Current Connections count : " + connections.size());
+      logger.debug("Connection ID not found, must be a failed reconnect : " + connectionID + " Current Connections count : " + connections.size());
+    }
+    try {
+      if (connectionID.getProductId().isReconnectEnabled()) {
+        persistor.removeClientState(connectionID.getClientID());
+      }
+    } catch (ClientNotFoundException notfound) {
+      logger.debug("not found", notfound);
     }
   }
 
@@ -165,17 +162,7 @@ public class ClusterStateImpl implements ClusterState {
       setStripeID(UUID.getUUID().toString());
     }
   }
-
-  @Override
-  public Map<GroupID, StripeID> getStripeIDMap() {
-    return stripeIDStateManager.getStripeIDMap(false);
-  }
-
-  @Override
-  public void addToStripeIDMap(GroupID gid, StripeID sid) {
-    stripeIDStateManager.verifyOrSaveStripeID(gid, sid, true);
-  }
-
+  
   @Override
   public String toString() {
     StringBuilder strBuilder = new StringBuilder();
@@ -188,4 +175,13 @@ public class ClusterStateImpl implements ClusterState {
     return strBuilder.toString();
   }
 
+  @Override
+  public void reportStateToMap(Map<String, Object> state) {
+    List<String> connects = new ArrayList<>(this.connections.size());
+    this.connections.forEach((c)->connects.add(c.toString()));
+    state.put("connections", connects);
+    state.put("nextChannelID", this.nextAvailChannelID);
+    state.put("currentState", this.currentState);
+    state.put("stripeID", this.stripeID);
+  }
 }

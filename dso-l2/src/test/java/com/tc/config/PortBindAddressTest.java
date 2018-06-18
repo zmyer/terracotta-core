@@ -23,6 +23,7 @@ import com.tc.config.schema.setup.StandardConfigurationSetupManagerFactory;
 import com.tc.test.TCTestCase;
 import com.tc.util.Assert;
 import org.apache.commons.io.IOUtils;
+import org.terracotta.config.TCConfigDefaults;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -53,7 +54,7 @@ public class PortBindAddressTest extends TCTestCase {
                       + "\n</servers>"
                       + "\n</tc-config>";
       writeConfigFile(config);
-      StandardConfigurationSetupManagerFactory factory = new StandardConfigurationSetupManagerFactory(new String[]{"-f", tcConfig.getAbsolutePath()}, null, null);
+      StandardConfigurationSetupManagerFactory factory = new StandardConfigurationSetupManagerFactory(new String[]{"-f", tcConfig.getAbsolutePath()}, null);
       L2ConfigurationSetupManager configSetupMgr = factory.createL2TVSConfigurationSetupManager("server1", getClass().getClassLoader());
       Assert.assertEquals("127.8.9.0", configSetupMgr.dsoL2Config().tsaPort().getBind());
       Assert.assertEquals("127.8.9.2", configSetupMgr.dsoL2Config().tsaGroupPort().getBind());
@@ -75,8 +76,8 @@ public class PortBindAddressTest extends TCTestCase {
       configSetupMgr = factory.createL2TVSConfigurationSetupManager("server4", getClass().getClassLoader());
       Assert.assertEquals("1.2.3.4", configSetupMgr.dsoL2Config().tsaPort().getBind());
       Assert.assertEquals("1.2.3.4", configSetupMgr.dsoL2Config().tsaGroupPort().getBind());
-      Assert.assertEquals(9510, configSetupMgr.dsoL2Config().tsaPort().getValue());
-      Assert.assertEquals(9530, configSetupMgr.dsoL2Config().tsaGroupPort().getValue());
+      Assert.assertEquals(TCConfigDefaults.TSA_PORT, configSetupMgr.dsoL2Config().tsaPort().getValue());
+      Assert.assertEquals(TCConfigDefaults.GROUP_PORT, configSetupMgr.dsoL2Config().tsaGroupPort().getValue());
     } catch (Exception e) {
       throw new AssertionError(e);
     }

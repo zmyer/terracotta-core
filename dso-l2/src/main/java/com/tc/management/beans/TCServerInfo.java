@@ -18,25 +18,25 @@
  */
 package com.tc.management.beans;
 
+import com.tc.async.impl.MonitoringEventCreator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.tc.config.schema.L2Info;
 import com.tc.config.schema.ServerGroupInfo;
 import com.tc.l2.context.StateChangedEvent;
+import com.tc.l2.state.ServerMode;
 import com.tc.l2.state.StateChangeListener;
 import com.tc.l2.state.StateManager;
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
 import com.tc.management.AbstractTerracottaMBean;
-import com.tc.properties.TCPropertiesConsts;
 import com.tc.properties.TCPropertiesImpl;
 import com.tc.runtime.JVMMemoryManager;
 import com.tc.runtime.TCRuntime;
 import com.tc.server.TCServer;
 import com.tc.util.ProductInfo;
-import com.tc.util.State;
 import com.tc.util.StringUtil;
 import com.tc.util.runtime.ThreadDumpUtil;
 
-import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -53,7 +53,7 @@ import javax.management.MBeanNotificationInfo;
 import javax.management.NotCompliantMBeanException;
 
 public class TCServerInfo extends AbstractTerracottaMBean implements TCServerInfoMBean, StateChangeListener {
-  private static final TCLogger                logger          = TCLogging.getLogger(TCServerInfo.class);
+  private static final Logger logger = LoggerFactory.getLogger(TCServerInfo.class);
 
   private static final boolean                 DEBUG           = false;
 
@@ -83,16 +83,14 @@ public class TCServerInfo extends AbstractTerracottaMBean implements TCServerInf
     this.nextSequenceNumber = 1;
     this.stateChangeNotificationInfo = new StateChangeNotificationInfo();
     this.manager = TCRuntime.getJVMMemoryManager();
+    if (TCPropertiesImpl.getProperties().getBoolean("tc.pipeline.monitoring.stats", false)) {
+      setPipelineMonitoring(true);
+    }
   }
 
   @Override
   public void reset() {
     // nothing to reset
-  }
-
-  @Override
-  public boolean isLegacyProductionModeEnabled() {
-    return false;
   }
 
   @Override
@@ -116,8 +114,13 @@ public class TCServerInfo extends AbstractTerracottaMBean implements TCServerInf
   }
 
   @Override
-  public boolean isRecovering() {
-    return server.isRecovering();
+  public boolean isReconnectWindow() {
+    return server.isReconnectWindow();
+  }
+
+  @Override
+  public int getReconnectWindowTimeout() {
+    return server.getReconnectWindowTimeout();
   }
 
   @Override
@@ -198,6 +201,8 @@ public class TCServerInfo extends AbstractTerracottaMBean implements TCServerInf
   public String getBuildID() {
     return buildID;
   }
+  
+  
 
   @Override
   public boolean isPatched() {
@@ -252,8 +257,8 @@ public class TCServerInfo extends AbstractTerracottaMBean implements TCServerInf
   }
 
   @Override
-  public ServerGroupInfo[] getServerGroupInfo() {
-    return server.serverGroups();
+  public ServerGroupInfo getStripeInfo() {
+    return server.getStripeInfo();
   }
 
   @Override
@@ -280,8 +285,8 @@ public class TCServerInfo extends AbstractTerracottaMBean implements TCServerInf
   public Map<String, Object> getStatistics() {
     Map<String, Object> map = new HashMap<>();
 
-    map.put(MEMORY_USED, Long.valueOf(getUsedMemory()));
-    map.put(MEMORY_MAX, Long.valueOf(getMaxMemory()));
+    map.put(MEMORY_USED, getUsedMemory());
+    map.put(MEMORY_MAX, getMaxMemory());
 
     return map;
   }
@@ -308,7 +313,7 @@ public class TCServerInfo extends AbstractTerracottaMBean implements TCServerInf
   }
 
   private String format(Properties properties, String keyPrefix) {
-    StringBuffer sb = new StringBuffer();
+    StringBuilder sb = new StringBuilder();
     Enumeration<?> keys = properties.propertyNames();
     ArrayList<String> l = new ArrayList<>();
 
@@ -375,18 +380,18 @@ public class TCServerInfo extends AbstractTerracottaMBean implements TCServerInf
 
   @Override
   public void l2StateChanged(StateChangedEvent sce) {
-    State state = sce.getCurrentState();
+    ServerMode cmode = StateManager.convert(sce.getCurrentState());
 
-    if (state.equals(StateManager.ACTIVE_COORDINATOR)) {
+    if (cmode == ServerMode.ACTIVE) {
       server.updateActivateTime();
     }
 
-    debugPrintln("*****  msg=[" + stateChangeNotificationInfo.getMsg(state) + "] attrName=["
-                 + stateChangeNotificationInfo.getAttributeName(state) + "] attrType=["
-                 + stateChangeNotificationInfo.getAttributeType(state) + "] stateName=[" + state.getName() + "]");
+    debugPrintln("*****  msg=[" + stateChangeNotificationInfo.getMsg(cmode) + "] attrName=["
+                 + stateChangeNotificationInfo.getAttributeName(cmode) + "] attrType=["
+                 + stateChangeNotificationInfo.getAttributeType(cmode) + "] stateName=[" + cmode.getName() + "]");
 
-    _sendNotification(stateChangeNotificationInfo.getMsg(state), stateChangeNotificationInfo.getAttributeName(state),
-                      stateChangeNotificationInfo.getAttributeType(state), Boolean.FALSE, Boolean.TRUE);
+    _sendNotification(stateChangeNotificationInfo.getMsg(cmode), stateChangeNotificationInfo.getAttributeName(cmode),
+                      stateChangeNotificationInfo.getAttributeType(cmode), Boolean.FALSE, Boolean.TRUE);
   }
 
   private synchronized void _sendNotification(String msg, String attr, String type, Object oldVal, Object newVal) {
@@ -418,61 +423,16 @@ public class TCServerInfo extends AbstractTerracottaMBean implements TCServerInf
   }
 
   @Override
-  public boolean isEnterprise() {
-    return server.getClass().getSimpleName().equals("EnterpriseServerImpl");
+  public final void setPipelineMonitoring(boolean monitor) {
+    if (monitor) {
+      MonitoringEventCreator.setPipelineMonitor(consumer->{
+        logger.info(consumer.toString());
+      });
+    } else {
+      MonitoringEventCreator.setPipelineMonitor(null);
+    }
   }
-
-  @Override
-  public boolean isSecure() {
-    return server.isSecure();
-  }
-
-  @Override
-  public String getSecurityServiceLocation() {
-    return server.getSecurityServiceLocation();
-  }
-
-  @Override
-  public String getSecurityHostname() {
-    server.getTSAListenPort();
-    return server.getSecurityHostname();
-  }
-
-  @Override
-  public String getIntraL2Username() {
-    return server.getIntraL2Username();
-  }
-
-  @Override
-  public Integer getSecurityServiceTimeout() {
-    return server.getSecurityServiceTimeout();
-  }
-
-  @Override
-  public void backup(String name) throws IOException {
-    server.backup(name);
-  }
-
-  @Override
-  public String getRunningBackup() {
-    return server.getRunningBackup();
-  }
-
-  @Override
-  public String getBackupStatus(String name) throws IOException {
-    return server.getBackupStatus(name);
-  }
-
-  @Override
-  public String getBackupFailureReason(String name) throws IOException {
-    return server.getBackupFailureReason(name);
-  }
-
-  @Override
-  public Map<String, String> getBackupStatuses() throws IOException {
-    return server.getBackupStatuses();
-  }
-
+  
   @Override
   public String getResourceState() {
     return server.getResourceState();

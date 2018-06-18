@@ -20,6 +20,7 @@
 package com.tc.entity;
 
 import com.tc.bytes.TCByteBuffer;
+import com.tc.exception.VoltronWrapperException;
 import com.tc.io.TCByteBufferOutputStream;
 import com.tc.net.protocol.tcm.MessageChannel;
 import com.tc.net.protocol.tcm.MessageMonitor;
@@ -37,23 +38,22 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 
 import org.terracotta.exception.EntityException;
-import org.terracotta.exception.EntityUserException;
+import org.terracotta.exception.EntityServerUncaughtException;
 
 
 public class VoltronEntityAppliedResponseImpl extends DSOMessageBase implements VoltronEntityAppliedResponse {
   private TransactionID transactionID;
   private boolean isSuccess;
-  private boolean isRetire;
   private byte[] successResponse;
   private EntityException failureException;
   
   @Override
   public VoltronEntityMessage.Acks getAckType() {
-    return VoltronEntityMessage.Acks.APPLIED;
+    return VoltronEntityMessage.Acks.COMPLETED;
   }
   
   @Override
-  public void setSuccess(TransactionID transactionID, byte[] response, boolean retire) {
+  public void setSuccess(TransactionID transactionID, byte[] response) {
     Assert.assertNull(this.transactionID);
     Assert.assertNull(this.successResponse);
     Assert.assertNull(this.failureException);
@@ -62,12 +62,11 @@ public class VoltronEntityAppliedResponseImpl extends DSOMessageBase implements 
     
     this.transactionID = transactionID;
     this.isSuccess = true;
-    this.isRetire = retire;
     this.successResponse = response;
   }
   
   @Override
-  public void setFailure(TransactionID transactionID, EntityException exception, boolean retire) {
+  public void setFailure(TransactionID transactionID, EntityException exception) {
     Assert.assertNull(this.transactionID);
     Assert.assertNull(this.successResponse);
     Assert.assertNull(this.failureException);
@@ -76,7 +75,6 @@ public class VoltronEntityAppliedResponseImpl extends DSOMessageBase implements 
     
     this.transactionID = transactionID;
     this.isSuccess = false;
-    this.isRetire = retire;
     this.failureException= exception;
   }
   
@@ -98,7 +96,6 @@ public class VoltronEntityAppliedResponseImpl extends DSOMessageBase implements 
     outputStream.writeLong(this.transactionID.toLong());
     
     outputStream.writeBoolean(this.isSuccess);
-    outputStream.writeBoolean(this.isRetire);
     
     if (this.isSuccess) {
       Assert.assertNotNull(this.successResponse);
@@ -112,6 +109,8 @@ public class VoltronEntityAppliedResponseImpl extends DSOMessageBase implements 
         ObjectOutputStream objectOutput = new ObjectOutputStream(byteOutput);      
         try {
           objectOutput.writeObject(this.failureException);
+        } catch (RuntimeException t) {
+          throw t;
         } finally {
           objectOutput.close();
         }
@@ -134,7 +133,7 @@ public class VoltronEntityAppliedResponseImpl extends DSOMessageBase implements 
     this.transactionID = new TransactionID(getLongValue());
     
     this.isSuccess = getBooleanValue();
-    this.isRetire = getBooleanValue();
+
     if (this.isSuccess) {
       this.successResponse = getBytesArray();
     } else {
@@ -145,7 +144,7 @@ public class VoltronEntityAppliedResponseImpl extends DSOMessageBase implements 
       } catch (ClassNotFoundException e) {
         // We may want to make this into an assertion but we do have a mechanism to pass it up to the next level so wrap
         // it in a user exception.
-        this.failureException = new EntityUserException(null, null, e);
+        this.failureException = new VoltronWrapperException(new EntityServerUncaughtException(null, null, "caught exception during invoke ", e));
       } finally {
         objectInput.close();
       }
@@ -166,10 +165,5 @@ public class VoltronEntityAppliedResponseImpl extends DSOMessageBase implements 
   @Override
   public EntityException getFailureException() {
     return this.failureException;
-  }
-  
-  @Override 
-  public boolean alsoRetire() {
-    return this.isRetire;
   }
 }

@@ -18,17 +18,17 @@
  */
 package com.tc.config.schema.setup;
 
-import com.tc.config.schema.setup.ConfigurationSetupException;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.cli.PosixParser;
 
-import com.tc.security.PwProvider;
+import com.tc.config.Directories;
 import com.tc.text.StringUtils;
 
 import java.io.File;
+import java.io.FileNotFoundException;
 
 /**
  * The standard implementation of {@link com.tc.config.schema.setup.ConfigurationSetupManagerFactory} &mdash; uses system properties and
@@ -45,33 +45,23 @@ public class StandardConfigurationSetupManagerFactory extends BaseConfigurationS
 
   private static final String L2_NAME_PROPERTY_NAME = "tc.server.name";
   public static final String DEFAULT_CONFIG_SPEC = "tc-config.xml";
-  public static final String DEFAULT_CONFIG_PATH = "default-config.xml";
-  public static final String DEFAULT_CONFIG_URI = "resource:///"
-                                                  + StandardConfigurationSetupManagerFactory.class.getPackage().getName().replace('.', '/')
-                                                  + "/" + DEFAULT_CONFIG_PATH;
 
   private final String[] args;
   private final String defaultL2Identifier;
   private final ConfigurationSpec configurationSpec;
-  private final PwProvider pwProvider;
 
   public static enum ConfigMode {
     L2, CUSTOM_L1, EXPRESS_L1
   }
 
-  public StandardConfigurationSetupManagerFactory(String[] args, ConfigMode configMode, PwProvider pwProvider)
+  public StandardConfigurationSetupManagerFactory(String[] args, ConfigMode configMode)
       throws ConfigurationSetupException {
-    this(args, parseDefaultCommandLine(args, configMode), configMode, pwProvider);
+    this(args, parseDefaultCommandLine(args, configMode), configMode);
   }
 
-  public StandardConfigurationSetupManagerFactory(String[] args, CommandLine commandLine, ConfigMode configMode, PwProvider pwProvider)
+  public StandardConfigurationSetupManagerFactory(String[] args, CommandLine commandLine, ConfigMode configMode)
       throws ConfigurationSetupException {
-    this(args, commandLine, configMode, System.getProperty(ConfigurationSetupManagerFactory.CONFIG_FILE_PROPERTY_NAME), pwProvider);
-  }
-
-  public StandardConfigurationSetupManagerFactory(String[] args, ConfigMode configMode, String configSpec,
-                                                  PwProvider pwProvider) throws ConfigurationSetupException {
-    this(args, parseDefaultCommandLine(args, configMode), configMode, configSpec, pwProvider);
+    this(args, commandLine, configMode, System.getProperty(ConfigurationSetupManagerFactory.CONFIG_FILE_PROPERTY_NAME));
   }
 
   private static CommandLine parseDefaultCommandLine(String[] args, ConfigMode configMode) throws ConfigurationSetupException {
@@ -88,8 +78,7 @@ public class StandardConfigurationSetupManagerFactory extends BaseConfigurationS
     }
   }
 
-  public StandardConfigurationSetupManagerFactory(String[] args, CommandLine commandLine, ConfigMode configMode, String configSpec,
-                                                  PwProvider pwProvider) throws ConfigurationSetupException {
+  public StandardConfigurationSetupManagerFactory(String[] args, CommandLine commandLine, ConfigMode configMode, String configSpec) throws ConfigurationSetupException {
     String effectiveConfigSpec = getEffectiveConfigSpec(configSpec, commandLine, configMode);
     String cwdAsString = System.getProperty("user.dir");
     if (StringUtils.isBlank(cwdAsString)) { throw new ConfigurationSetupException(
@@ -102,7 +91,6 @@ public class StandardConfigurationSetupManagerFactory extends BaseConfigurationS
                                                    System.getProperty(ConfigurationSetupManagerFactory.SERVER_CONFIG_FILE_PROPERTY_NAME),
                                                    configMode, new File(cwdAsString));
     this.defaultL2Identifier = getDefaultL2Identifier(commandLine);
-    this.pwProvider = pwProvider;
   }
 
   private String getDefaultL2Identifier(CommandLine commandLine) {
@@ -127,15 +115,27 @@ public class StandardConfigurationSetupManagerFactory extends BaseConfigurationS
       if (localConfig.exists()) {
         effectiveConfigSpec = localConfig.getAbsolutePath();
       } else if (configMode == ConfigMode.L2) {
-        effectiveConfigSpec = DEFAULT_CONFIG_URI;
+        try {
+          File defaultConfigFile = Directories.getDefaultConfigFile();
+          if (defaultConfigFile.exists()) {
+            effectiveConfigSpec = defaultConfigFile.getAbsolutePath();
+          }
+        } catch (FileNotFoundException e) {
+          // Ignore
+        }
       }
     }
 
     if (StringUtils.isBlank(effectiveConfigSpec)) {
       // formatting
       throw new ConfigurationSetupException("You must specify the location of the Terracotta "
-                                            + "configuration file for this process, using the " + "'" + CONFIG_FILE_PROPERTY_NAME
-                                            + "' system property.");
+                                            + "configuration file for this process.\n" +
+                                            "You can do this by:\n" +
+                                            "\t* using the '-f <file>' flag on the command line\n" +
+                                            "\t* using the " + "'" + CONFIG_FILE_PROPERTY_NAME + "' system property\n" +
+                                            "\t* placing the file in '${user.dir}/tc-config.xml'\n" +
+                                            "\t* placing the file in '<install_root>/conf/tc-config.xml\n" +
+                                            "The above options are in order of precedence.");
     }
 
     return effectiveConfigSpec;
@@ -171,7 +171,7 @@ public class StandardConfigurationSetupManagerFactory extends BaseConfigurationS
     if (l2Name == null) l2Name = this.defaultL2Identifier;
 
     ConfigurationCreator configurationCreator;
-    configurationCreator = new StandardXMLFileConfigurationCreator(this.configurationSpec, this.beanFactory, this.pwProvider);
+    configurationCreator = new StandardXMLFileConfigurationCreator(this.configurationSpec, this.beanFactory);
 
     return new L2ConfigurationSetupManagerImpl(args, configurationCreator, l2Name, loader);
   }

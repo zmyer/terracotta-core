@@ -18,8 +18,9 @@
  */
 package com.tc.object;
 
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.tc.net.core.ConnectionInfo;
 import com.tc.net.protocol.tcm.ClientMessageChannel;
 import com.tc.object.config.ConnectionInfoConfig;
@@ -30,7 +31,7 @@ import java.util.HashSet;
 import java.util.Set;
 
 public class ClientShutdownManager {
-  private static final TCLogger                    logger         = TCLogging.getLogger(ClientShutdownManager.class);
+  private static final Logger logger = LoggerFactory.getLogger(ClientShutdownManager.class);
 
   private final ClientMessageChannel               channel;
 
@@ -104,9 +105,6 @@ public class ClientShutdownManager {
     // XXX: Race condition here --> we can start the non-immediate shutdown procedure becuase we think the channel is
     // open, but it can die before we start (or in the middle of) flushing the local work
     if (channel.isConnected()) { return false; }
-
-    // If we've connected to a persistent server, we should try to flush
-    if (handshakeManager.serverIsPersistent()) { return false; }
 
     // If we think there is more than one server out there, we should try to flush
     ConnectionInfoConfig connectionInfoItem = this.connectionComponents.createConnectionInfoConfigItem();

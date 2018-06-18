@@ -63,8 +63,16 @@ The Initial Developer of the Covered Software is
       <outputDirectory>/legal</outputDirectory>
     </fileSet>
     <fileSet>
-      <directory>src/assemble/server/bin</directory>
-      <outputDirectory>/server/bin</outputDirectory>
+      <directory>src/assemble/server</directory>
+      <outputDirectory>/server</outputDirectory>
+    </fileSet>
+    <fileSet>
+      <directory>src/assemble/client</directory>
+      <outputDirectory>/client</outputDirectory>
+    </fileSet>
+    <fileSet>
+      <directory>src/assemble/voter</directory>
+      <outputDirectory>/voter</outputDirectory>
     </fileSet>
     <!-- copy dependencies of terracotta (except itself) into /server/lib -->
     <fileSet>
@@ -94,6 +102,12 @@ The Initial Developer of the Covered Software is
       </includes>
     </dependencySet>
     <dependencySet>
+      <outputDirectory>voter/lib</outputDirectory>
+      <includes>
+        <include>org.terracotta.internal:voter</include>
+      </includes>
+    </dependencySet>
+    <dependencySet>
       <outputDirectory>client/logging</outputDirectory>
       <includes>
         <include>org.slf4j:slf4j-api</include>
@@ -102,7 +116,13 @@ The Initial Developer of the Covered Software is
     <dependencySet>
       <outputDirectory>client/logging/impl</outputDirectory>
       <includes>
-        <include>org.slf4j:slf4j-log4j12</include>
+        <include>ch.qos.logback:logback-core</include>
+      </includes>
+    </dependencySet>
+    <dependencySet>
+      <outputDirectory>client/logging/impl</outputDirectory>
+      <includes>
+        <include>ch.qos.logback:logback-classic</include>
       </includes>
     </dependencySet>
   </dependencySets>

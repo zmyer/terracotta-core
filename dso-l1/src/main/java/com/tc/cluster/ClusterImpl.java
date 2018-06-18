@@ -18,22 +18,17 @@
  */
 package com.tc.cluster;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.tc.async.api.Sink;
 import com.tc.async.api.Stage;
 import com.tc.exception.TCNotRunningException;
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
 import com.tc.net.ClientID;
 import com.tc.properties.TCPropertiesConsts;
 import com.tc.properties.TCPropertiesImpl;
 import com.tc.util.Util;
-import com.tcclient.cluster.ClusterInternal;
-import com.tcclient.cluster.ClusterInternalEventsContext;
-import com.tcclient.cluster.ClusterNodeStatus;
-import com.tcclient.cluster.ClusterNodeStatus.ClusterNodeStateType;
-import com.tcclient.cluster.Node;
-import com.tcclient.cluster.NodeInternal;
-import com.tcclient.cluster.OutOfBandClusterListener;
+import com.tc.cluster.ClusterNodeStatus.ClusterNodeStateType;
 
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -41,8 +36,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class ClusterImpl implements ClusterInternal {
 
-  private static final TCLogger                          LOGGER               = TCLogging
-                                                                                  .getLogger(ClusterImpl.class);
+  private static final Logger LOGGER = LoggerFactory.getLogger(ClusterImpl.class);
 
   private volatile ClientID                              currentClientID;
   private volatile NodeInternal                          currentNode;
@@ -171,7 +165,7 @@ public class ClusterImpl implements ClusterInternal {
         }
       }
       nodeStatus.operationsEnabled();
-      LOGGER.info("NODE_JOINED " + currentClientID);
+      LOGGER.debug("NODE_JOINED " + currentClientID);
     } finally {
       stateWriteLock.unlock();
 
@@ -205,14 +199,14 @@ public class ClusterImpl implements ClusterInternal {
       // We may get a node left event without ever seeing a node joined event, just ignore
       // the node left event in that case
       if (!nodeStatus.getState().isNodeJoined()) {
-        LOGGER.info("ignoring NODE_LEFT " + currentClientID + " because nodeStatus " + nodeStatus.getState());
+        LOGGER.debug("ignoring NODE_LEFT " + currentClientID + " because nodeStatus " + nodeStatus.getState());
         return;
       }
       if (nodeStatus.getState().areOperationsEnabled()) {
         fireOperationsDisabled = true;
       }
       nodeStatus.nodeLeft();
-      LOGGER.info("NODE_LEFT " + currentClientID + " nodeStatus " + nodeStatus);
+      LOGGER.debug("NODE_LEFT " + currentClientID + " nodeStatus " + nodeStatus);
     } finally {
       stateWriteLock.unlock();
     }
@@ -313,7 +307,7 @@ public class ClusterImpl implements ClusterInternal {
         }
       });
     } else {
-      this.eventsProcessorSink.addSingleThreaded(new ClusterInternalEventsContext(eventType, event, listener));
+      this.eventsProcessorSink.addToSink(new ClusterInternalEventsContext(eventType, event, listener));
     }
   }
 
@@ -340,9 +334,6 @@ public class ClusterImpl implements ClusterInternal {
           return;
         case OPERATIONS_DISABLED:
           listener.operationsDisabled(event);
-          return;
-        case NODE_REJOINED:
-          listener.nodeRejoined(event);
           return;
         case NODE_ERROR:
           listener.nodeError(event);

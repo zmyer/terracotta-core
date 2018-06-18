@@ -19,16 +19,17 @@
 package com.tc.stats;
 
 
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.tc.management.AbstractTerracottaMBean;
-import com.tc.management.beans.TerracottaOperatorEventsMBean;
 import com.tc.management.beans.l1.L1InfoMBean;
 import com.tc.net.ClientID;
 import com.tc.net.TCSocketAddress;
 import com.tc.net.protocol.tcm.ChannelID;
 import com.tc.net.protocol.tcm.MessageChannel;
 import com.tc.object.net.ChannelStats;
+import com.tc.objectserver.handshakemanager.ClientHandshakeMonitoringInfo;
 import com.tc.stats.api.ClientMBean;
 import com.tc.stats.counter.Counter;
 import com.tc.stats.counter.sampled.SampledCounter;
@@ -50,19 +51,17 @@ import javax.management.ObjectName;
 
 public class Client extends AbstractTerracottaMBean implements ClientMBean, NotificationListener {
 
-  private static final TCLogger                logger                  = TCLogging.getLogger(Client.class);
+  private static final Logger logger = LoggerFactory.getLogger(Client.class);
 
   private final MBeanServer                    mbeanServer;
   private ObjectName                           l1InfoBeanName;
   private L1InfoMBean                          l1InfoBean;
-  private ObjectName                           l1OperatorEventsBeanName;
-  private TerracottaOperatorEventsMBean        l1OperatorEventsBean;
   private final MessageChannel                 channel;
   private final SampledCounter                 txnRate;
   private final SampledCounter                 writeRate;
   private final SampledCounter                 readRate;
   private final Counter                        pendingTransactions;
-  private final AtomicLong                     sequenceNumber          = new AtomicLong(0L);
+  private final ClientHandshakeMonitoringInfo   minfo;
   private final ClientID                       clientID;
 
   private ObjectName                           enterpriseMBeanName;
@@ -87,6 +86,8 @@ public class Client extends AbstractTerracottaMBean implements ClientMBean, Noti
     this.writeRate = (SampledCounter) channelStats.getCounter(channel, ChannelStats.WRITE_RATE);
     this.readRate = (SampledCounter) channelStats.getCounter(channel, ChannelStats.READ_RATE);
     this.pendingTransactions = channelStats.getCounter(channel, ChannelStats.PENDING_TRANSACTIONS);
+    this.minfo = (ClientHandshakeMonitoringInfo)channel.getAttachment(ClientHandshakeMonitoringInfo.MONITORING_INFO_ATTACHMENT);
+
   }
 
   @Override
@@ -120,16 +121,6 @@ public class Client extends AbstractTerracottaMBean implements ClientMBean, Noti
   @Override
   public ObjectName getL1DumperBeanName() {
     return ObjectName.WILDCARD;
-  }
-
-  @Override
-  public ObjectName getL1OperatorEventsBeanName() {
-    return l1OperatorEventsBeanName;
-  }
-
-  @Override
-  public TerracottaOperatorEventsMBean getL1OperatorEventsBean() {
-    return l1OperatorEventsBean;
   }
 
   @Override
@@ -187,7 +178,29 @@ public class Client extends AbstractTerracottaMBean implements ClientMBean, Noti
     logger.warn("Killing Client on JMX Request :" + channel);
     channel.close();
   }
-
+  
+  @Override
+  public int getRemotePID() {
+    if (minfo !=null) {
+      return minfo.getPid();
+    }
+    return -1;
+  }
+  @Override
+  public String getRemoteName() {
+    if (minfo !=null) {
+      return minfo.getName();
+    }
+    return "";
+  }
+  @Override
+  public String getRemoteUUID() {
+    if (minfo !=null) {
+      return minfo.getUuid();
+    }
+    return "";
+  }
+  
   private void setupL1InfoBean() {
     l1InfoBean = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, l1InfoBeanName, L1InfoMBean.class, false);
   }

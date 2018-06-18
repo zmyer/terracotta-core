@@ -18,17 +18,17 @@
  */
 package com.tc.net.protocol.tcm;
 
+import org.slf4j.LoggerFactory;
+
 import com.tc.lang.TCThreadGroup;
 import com.tc.lang.ThrowableHandlerImpl;
-import com.tc.logging.TCLogging;
+import com.tc.net.ClientID;
 import com.tc.net.CommStackMismatchException;
 import com.tc.net.MaxConnectionsExceededException;
 import com.tc.net.TCSocketAddress;
-import com.tc.net.core.ConnectionAddressProvider;
 import com.tc.net.core.ConnectionInfo;
 import com.tc.net.protocol.PlainNetworkStackHarnessFactory;
 import com.tc.net.protocol.transport.ClientMessageTransport;
-import com.tc.net.protocol.transport.ConnectionID;
 import com.tc.net.protocol.transport.DefaultConnectionIdFactory;
 import com.tc.net.protocol.transport.NullConnectionPolicy;
 import com.tc.net.proxy.TCPProxy;
@@ -36,6 +36,7 @@ import com.tc.object.session.NullSessionManager;
 import com.tc.test.TCTestCase;
 import com.tc.util.Assert;
 import com.tc.util.PortChooser;
+import com.tc.util.ProductID;
 import com.tc.util.TCTimeoutException;
 import com.tc.util.concurrent.ThreadUtil;
 
@@ -63,6 +64,7 @@ public class LazyHandshakeTest extends TCTestCase {
   private PortChooser           pc;
   private TCPProxy              proxy;
   private int                   proxyPort;
+  private ConnectionInfo        connectTo;
 
   private NetworkListener       listener;
   private final ClientMessageChannel  channel[]          = new ClientMessageChannel[CLIENT_COUNT];
@@ -80,11 +82,11 @@ public class LazyHandshakeTest extends TCTestCase {
     clientComms = new CommunicationsManagerImpl("TestCommsMgr", new NullMessageMonitor(), new PlainNetworkStackHarnessFactory(),
                                                 new NullConnectionPolicy());
 
-    listener = serverComms.createListener(new NullSessionManager(), new TCSocketAddress(0), true,
-                                          new DefaultConnectionIdFactory());
+    listener = serverComms.createListener(new TCSocketAddress(0), true,
+                                          new DefaultConnectionIdFactory(), (t)->true);
 
     try {
-      listener.start(new HashSet<ConnectionID>());
+      listener.start(new HashSet<ClientID>());
     } catch (Exception e) {
       System.out.println("lsnr Excep");
     }
@@ -92,6 +94,8 @@ public class LazyHandshakeTest extends TCTestCase {
     proxyPort = pc.chooseRandomPort();
     proxy = new TCPProxy(proxyPort, listener.getBindAddress(), listener.getBindPort(), PROXY_SYNACK_DELAY, false, null);
 
+    connectTo = new ConnectionInfo(listener
+                                 .getBindAddress().getHostAddress(), proxyPort);
     try {
       proxy.start();
     } catch (Exception e) {
@@ -101,10 +105,8 @@ public class LazyHandshakeTest extends TCTestCase {
 
   private ClientMessageChannel createClientMessageChannel() {
     return clientComms
-        .createClientChannel(new NullSessionManager(), 0, listener.getBindAddress().getHostAddress(), proxyPort,
-                             (int) PROXY_SYNACK_DELAY,
-                             new ConnectionAddressProvider(new ConnectionInfo[] { new ConnectionInfo(listener
-                                 .getBindAddress().getHostAddress(), proxyPort) }));
+        .createClientChannel(ProductID.STRIPE, new NullSessionManager(),
+                             (int) PROXY_SYNACK_DELAY);
   }
 
   @Override
@@ -113,7 +115,7 @@ public class LazyHandshakeTest extends TCTestCase {
   }
 
   public void testLazyHandshake() {
-    TCThreadGroup threadGroup = new TCThreadGroup(new ThrowableHandlerImpl(TCLogging.getLogger(this.getClass())));
+    TCThreadGroup threadGroup = new TCThreadGroup(new ThrowableHandlerImpl(LoggerFactory.getLogger(this.getClass())));
     // imitating TCGroupManager implementation of StaticMemberDiscovery on handshake timeouts
 
     Thread lazyThread = new Thread(threadGroup, new Runnable() {
@@ -143,7 +145,7 @@ public class LazyHandshakeTest extends TCTestCase {
         public void run() {
           channel[currentClient] = createClientMessageChannel();
           try {
-            channel[currentClient].open();
+            channel[currentClient].open(connectTo);
           } catch (UnknownHostException e) {
             // who am I, then
           } catch (MaxConnectionsExceededException e) {

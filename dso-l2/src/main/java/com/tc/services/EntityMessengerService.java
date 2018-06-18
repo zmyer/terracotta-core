@@ -18,196 +18,273 @@
  */
 package com.tc.services;
 
-import org.terracotta.entity.EntityMessage;
-import org.terracotta.entity.IEntityMessenger;
-import org.terracotta.entity.MessageCodec;
-import org.terracotta.entity.MessageCodecException;
-
 import com.tc.async.api.Sink;
 import com.tc.entity.VoltronEntityMessage;
 import com.tc.net.ClientID;
 import com.tc.object.ClientInstanceID;
 import com.tc.object.EntityDescriptor;
+import com.tc.object.FetchID;
 import com.tc.object.tx.TransactionID;
 import com.tc.objectserver.api.ManagedEntity;
+import com.tc.objectserver.api.ManagedEntity.LifecycleListener;
 import com.tc.objectserver.handler.RetirementManager;
 import com.tc.util.Assert;
+import org.terracotta.entity.EntityMessage;
+import org.terracotta.entity.ExplicitRetirementHandle;
+import org.terracotta.entity.IEntityMessenger;
+import org.terracotta.entity.MessageCodec;
+import org.terracotta.entity.MessageCodecException;
 
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
+import org.terracotta.entity.CommonServerEntity;
+import org.terracotta.entity.EntityResponse;
+import org.terracotta.exception.EntityException;
 
 /**
  * Implements the IEntityMessenger interface by maintaining a "fake" EntityDescriptor (as there is no actual reference from
  * a client) and using that to send "fake" VoltronEntityMessage instances into the server's message sink.
  */
-public class EntityMessengerService implements IEntityMessenger {
-  private final SingleThreadedTimer timer;
+public class EntityMessengerService<M extends EntityMessage, R extends EntityResponse> implements IEntityMessenger<M, R>, LifecycleListener {
+  private final AtomicLong NEXT_FAKE_TXN_ID = new AtomicLong();
+
   private final Sink<VoltronEntityMessage> messageSink;
-  private final ManagedEntity owningEntity;
+  private final boolean waitForReceived;
   private final RetirementManager retirementManager;
-  private final MessageCodec<EntityMessage, ?> codec;
+  private final MessageCodec<M, R> codec;
   private final EntityDescriptor fakeDescriptor;
+  private final ConcurrentHashMap<ExplicitRetirementHandle, Handle> retirementHandles = new ConcurrentHashMap<>();
 
   @SuppressWarnings("unchecked")
-  public EntityMessengerService(SingleThreadedTimer timer, Sink<VoltronEntityMessage> messageSink, ManagedEntity owningEntity) {
-    Assert.assertNotNull(timer);
+  public EntityMessengerService(Sink<VoltronEntityMessage> messageSink,
+                                ManagedEntity owningEntity, boolean waitForReceived) {
     Assert.assertNotNull(messageSink);
     Assert.assertNotNull(owningEntity);
-    
-    this.timer = timer;
+
     this.messageSink = messageSink;
-    this.owningEntity = owningEntity;
+    this.waitForReceived = waitForReceived;
     // We need access to the retirement manager in order to build dependencies between messages on this entity.
     this.retirementManager = owningEntity.getRetirementManager();
     // If this service is being created, we expect that the entity has a retirement mananger.
     Assert.assertTrue(null != this.retirementManager);
     // Note that the codec will actually expect to work on a sub-type of EntityMessage but this service isn't explicitly
     // given the actual type.  This means that incorrect usage will result in a runtime failure.
-    this.codec = (MessageCodec<EntityMessage, ?>) owningEntity.getCodec();
-    
-    this.fakeDescriptor = new EntityDescriptor(owningEntity.getID(), ClientInstanceID.NULL_ID, owningEntity.getVersion());
+    this.codec = (MessageCodec<M, R>) owningEntity.getCodec();
+    Assert.assertNotNull(codec);
+
+    this.fakeDescriptor = EntityDescriptor.createDescriptorForInvoke(new FetchID(owningEntity.getConsumerID()),ClientInstanceID.NULL_ID);
   }
 
   @Override
-  public void messageSelf(EntityMessage message) throws MessageCodecException {
-    scheduleMessage(message);
+  public void messageSelf(M message) throws MessageCodecException {
+    this.messageSelf(message, null);
   }
 
   @Override
-  public void messageSelfAndDeferRetirement(EntityMessage originalMessageToDefer, EntityMessage newMessageToSchedule) throws MessageCodecException {
+  public void messageSelf(M message, Consumer<MessageResponse<R>> response) throws MessageCodecException {
+    // Make sure we have started.
+    scheduleMessage(message, response);
+  }
+  
+  @Override
+  public ExplicitRetirementHandle deferRetirement(String tag,
+                                                  M originalMessageToDefer,
+                                                  M futureMessage) {
+    // defer, as normal
+    retirementManager.deferRetirement(originalMessageToDefer, futureMessage);
+    // return handle
+    return new Handle(tag, futureMessage);
+  }
+  
+  @Override
+  public void messageSelfAndDeferRetirement(M originalMessageToDefer,
+                                            M newMessageToSchedule) throws MessageCodecException {
+    this.messageSelfAndDeferRetirement(originalMessageToDefer, newMessageToSchedule, null);
+  }  
+
+  @Override
+  public void messageSelfAndDeferRetirement(M originalMessageToDefer,
+                                            M newMessageToSchedule, Consumer<MessageResponse<R>> response) throws MessageCodecException {
     // This requires that we access the RetirementManager to change the retirement of the current message.
     this.retirementManager.deferRetirement(originalMessageToDefer, newMessageToSchedule);
     // Schedule the message, as per normal.
-    scheduleMessage(newMessageToSchedule);
+    scheduleMessage(newMessageToSchedule, response);
+  }
+  
+  @Override
+  public synchronized void entityCreated(ManagedEntity sender) {
+
   }
 
   @Override
-  public ScheduledToken messageSelfAfterDelay(EntityMessage message, long millisBeforeSend) throws MessageCodecException {
-    FakeEntityMessage interEntityMessage = encodeAsFake(message);
-    long startTimeMillis = this.timer.currentTimeMillis() + millisBeforeSend;
-    long id = this.timer.addDelayed(new Runnable() {
-      @Override
-      public void run() {
-        // Pre-filter if entity was destroyed.
-        if (!EntityMessengerService.this.owningEntity.isDestroyed()) {
-          EntityMessengerService.this.messageSink.addSingleThreaded(interEntityMessage);
-        }
-      }}, startTimeMillis);
-    
-    return new TokenWrapper(id);
+  public synchronized void entityDestroyed(ManagedEntity sender) {
+
   }
 
-  @Override
-  public ScheduledToken messageSelfPeriodically(EntityMessage message, long millisBetweenSends) throws MessageCodecException {
-    FakeEntityMessage interEntityMessage = encodeAsFake(message);
-    long startTimeMillis = this.timer.currentTimeMillis() + millisBetweenSends;
-    SelfDestructiveRunnable runnable = new SelfDestructiveRunnable(this.messageSink, this.owningEntity, interEntityMessage);
-    long id = this.timer.addPeriodic(runnable, startTimeMillis, millisBetweenSends);
-    runnable.prepareForCancel(this.timer, id);
-    return new TokenWrapper(id);
-  }
-
-  @Override
-  public void cancelTimedMessage(ScheduledToken token) {
-    // If this is the wrong type, the ClassCastException is a reasonable error since it means we got something invalid.
-    // Note that we ignore whether or not the cancel succeeded but we may want to log this, in the future.
-    this.timer.cancel(((TokenWrapper)token).token);
-  }
-
-
-  private void scheduleMessage(EntityMessage message) throws MessageCodecException {
+  private void scheduleMessage(M message, Consumer<MessageResponse<R>> response) throws MessageCodecException {
     // We first serialize the message (note that this is partially so we can use the common message processor, which expects
     // to deserialize, but also because we may have to replicate the message to the passive).
-    FakeEntityMessage interEntityMessage = encodeAsFake(message);
-    this.messageSink.addSingleThreaded(interEntityMessage);
+    FakeEntityMessage interEntityMessage = encodeAsFake(message, response);
+    // if the entity isDestroyed(), this message could be being sent during the create sequence
+    this.messageSink.addToSink(interEntityMessage);
   }
 
-  private FakeEntityMessage encodeAsFake(EntityMessage message) throws MessageCodecException {
+  private FakeEntityMessage encodeAsFake(M message, Consumer<MessageResponse<R>> response) throws MessageCodecException {
     byte[] serializedMessage = this.codec.encodeMessage(message);
-    FakeEntityMessage interEntityMessage = new FakeEntityMessage(this.fakeDescriptor, message, serializedMessage);
+    FakeEntityMessage interEntityMessage = new FakeEntityMessage(this.fakeDescriptor, message, serializedMessage, response, waitForReceived);
     return interEntityMessage;
   }
-
-
   /**
    * We fake up a Voltron entity message to enqueue for the entity to process in the future.
    */
-  private static class FakeEntityMessage implements VoltronEntityMessage {
+  public class FakeEntityMessage<R extends EntityResponse> implements VoltronEntityMessage {
     private final EntityDescriptor descriptor;
     private final EntityMessage identityMessage;
     private final byte[] message;
+    private final Consumer<MessageResponse<R>> response;
+    private final boolean waitForReceived;
 
-    public FakeEntityMessage(EntityDescriptor descriptor, EntityMessage identityMessage, byte[] message) {
+    public FakeEntityMessage(EntityDescriptor descriptor, EntityMessage identityMessage, byte[] message, Consumer<MessageResponse<R>> response, boolean waitForReceived) {
       this.descriptor = descriptor;
       this.identityMessage = identityMessage;
       this.message = message;
+      this.response = response;
+      this.waitForReceived = waitForReceived;
     }
+
     @Override
     public ClientID getSource() {
       return ClientID.NULL_ID;
     }
+
     @Override
     public TransactionID getTransactionID() {
-      return TransactionID.NULL_ID;
+      return new TransactionID(NEXT_FAKE_TXN_ID.incrementAndGet());
     }
+
     @Override
     public EntityDescriptor getEntityDescriptor() {
       return this.descriptor;
     }
+
     @Override
     public boolean doesRequireReplication() {
       return true;
     }
+
+    @Override
+    public boolean doesRequestReceived() {
+      return waitForReceived;
+    }
+
     @Override
     public Type getVoltronType() {
       return Type.INVOKE_ACTION;
     }
+
     @Override
     public byte[] getExtendedData() {
       return this.message;
     }
+
     @Override
     public TransactionID getOldestTransactionOnClient() {
       return TransactionID.NULL_ID;
     }
+
     @Override
     public EntityMessage getEntityMessage() {
       return this.identityMessage;
     }
+    
+    public Consumer<byte[]> getCompletionHandler() {
+      return response == null ? null : (raw)->this.response.accept(new MessageResponse() {
+        @Override
+        public boolean wasExceptionThrown() {
+          return false;
+        }
+
+        @Override
+        public Exception getException() {
+          return null;
+        }
+
+        @Override
+        public EntityResponse getResponse() {
+          try {
+            return codec.decodeResponse(raw);
+          } catch (MessageCodecException codec) {
+            throw new RuntimeException(codec);
+          }
+        }
+      });
+    }
+    
+    public Consumer<EntityException> getExceptionHandler() {
+      return response == null ? null : (exception)->this.response.accept(new MessageResponse() {
+        @Override
+        public boolean wasExceptionThrown() {
+          return true;
+        }
+
+        @Override
+        public Exception getException() {
+          return exception;
+        }
+
+        @Override
+        public EntityResponse getResponse() {
+          return null;
+        }
+      });
+    }
   }
 
+  public class Handle implements ExplicitRetirementHandle {
+    private final String tag;
+    private final M futureMessage;
+    private final long nowTimeNS;
+    private final boolean active = true;
 
-  private static class SelfDestructiveRunnable implements Runnable {
-    private final Sink<VoltronEntityMessage> messageSink;
-    private final ManagedEntity owningEntity;
-    private final FakeEntityMessage message;
-    private SingleThreadedTimer timer;
-    private long id;
-    
-    public SelfDestructiveRunnable(Sink<VoltronEntityMessage> messageSink, ManagedEntity owningEntity, FakeEntityMessage message) {
-      this.messageSink = messageSink;
-      this.owningEntity = owningEntity;
-      this.message = message;
+    private Handle(String tag, M futureMessage) {
+      this.tag = tag;
+      this.futureMessage = futureMessage;
+      this.nowTimeNS = System.nanoTime();
+      retirementHandles.put(this, this);
     }
-    
-    public void prepareForCancel(SingleThreadedTimer timer, long id) {
-      this.timer = timer;
-      this.id = id;
-    }
-    
+
     @Override
-    public void run() {
-      if (this.owningEntity.isDestroyed()) {
-        this.timer.cancel(id);
-      } else {
-        this.messageSink.addSingleThreaded(this.message);
+    public String getTag() {
+      return tag;
+    }
+
+    @Override
+    public void release() throws MessageCodecException {
+      if (retirementHandles.remove(this) != null) {
+        EntityMessengerService.this.messageSelf(futureMessage);
       }
     }
-  }
 
+    @Override
+    public void release(Consumer consumer) throws MessageCodecException {
+      if (retirementHandles.remove(this) != null) {
+        EntityMessengerService.this.messageSelf(futureMessage, consumer);
+      }
+    }
+    
+    public boolean isActive() {
+      return active;
+    }
 
-  private static class TokenWrapper implements ScheduledToken {
-    public final long token;
-    public TokenWrapper(long token) {
-      this.token = token;
+    public long getCreationTimeMS() {
+      return TimeUnit.MILLISECONDS.convert(nowTimeNS, TimeUnit.NANOSECONDS);
+    }
+
+    @Override
+    public String toString() {
+      return "ExplicitRetirementHandle: { active=" + active + " tag=" + tag + " age=" + nowTimeNS + "ns";
     }
   }
 }

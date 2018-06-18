@@ -18,8 +18,7 @@
  */
 package com.tc.net.core;
 
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
+import com.tc.net.ClientID;
 import com.tc.net.ServerID;
 import com.tc.net.TCSocketAddress;
 import com.tc.net.protocol.NetworkStackHarnessFactory;
@@ -35,7 +34,6 @@ import com.tc.net.protocol.tcm.NullMessageMonitor;
 import com.tc.net.protocol.tcm.TCMessage;
 import com.tc.net.protocol.tcm.TCMessageRouterImpl;
 import com.tc.net.protocol.tcm.TCMessageType;
-import com.tc.net.protocol.transport.ConnectionID;
 import com.tc.net.protocol.transport.DefaultConnectionIdFactory;
 import com.tc.net.protocol.transport.HealthCheckerConfigImpl;
 import com.tc.net.protocol.transport.NullConnectionPolicy;
@@ -50,37 +48,35 @@ import com.tc.util.PortChooser;
 import com.tc.util.concurrent.ThreadUtil;
 import com.tc.util.runtime.ThreadDumpUtil;
 import com.tc.properties.TCPropertiesConsts;
+import com.tc.util.ProductID;
 
 import java.net.InetAddress;
 import java.util.Collections;
 import org.junit.Ignore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 // TODO: Fix test
 @Ignore
 public class OOOReconnectTimeoutTest extends TCTestCase {
   //
 
-  TCLogger          logger               = TCLogging.getLogger(TCWorkerCommManager.class);
+  Logger logger = LoggerFactory.getLogger(TCWorkerCommManager.class);
   private final int L1_RECONNECT_TIMEOUT = 15000;
 
-  private ClientMessageChannel createClientMsgCh(int port) {
-    return createClientMsgCh(port, true);
+  private ClientMessageChannel createClientMsgCh() {
+    return createClientMsgCh(true);
   }
 
-  private ClientMessageChannel createClientMsgCh(int port, boolean ooo) {
+  private ClientMessageChannel createClientMsgCh(boolean ooo) {
 
     CommunicationsManager clientComms = new CommunicationsManagerImpl("Client-TestCommsMgr", new NullMessageMonitor(),
                                                                       getNetworkStackHarnessFactory(ooo),
                                                                       new NullConnectionPolicy());
 
     ClientMessageChannel clientMsgCh = clientComms
-        .createClientChannel(new NullSessionManager(),
-                             -1,
-                             "localhost",
-                             port,
-                             1000,
-                             new ConnectionAddressProvider(
-                                                           new ConnectionInfo[] { new ConnectionInfo("localhost", port) }));
+        .createClientChannel(ProductID.STRIPE, new NullSessionManager(),
+                             1000);
     return clientMsgCh;
   }
 
@@ -112,23 +108,25 @@ public class OOOReconnectTimeoutTest extends TCTestCase {
                                                                    new ServerID(),
                                                                    new TransportHandshakeErrorNullHandler(),
                                                                    Collections.<TCMessageType, Class<? extends TCMessage>>emptyMap(),
-                                                                   Collections.<TCMessageType, GeneratedMessageFactory>emptyMap(), null);
-    NetworkListener listener = commsMgr.createListener(new NullSessionManager(), new TCSocketAddress(0), true,
-                                                       new DefaultConnectionIdFactory());
-    listener.start(Collections.<ConnectionID>emptySet());
+                                                                   Collections.<TCMessageType, GeneratedMessageFactory>emptyMap());
+    NetworkListener listener = commsMgr.createListener(new TCSocketAddress(0), true,
+                                                       new DefaultConnectionIdFactory(), (t)->true);
+    listener.start(Collections.<ClientID>emptySet());
     int serverPort = listener.getBindPort();
 
     int proxyPort = new PortChooser().chooseRandomPort();
     TCPProxy proxy = new TCPProxy(proxyPort, InetAddress.getByName("localhost"), serverPort, 0, false, null);
     proxy.start();
 
-    ClientMessageChannel client1 = createClientMsgCh(proxyPort);
-    ClientMessageChannel client2 = createClientMsgCh(proxyPort);
-    ClientMessageChannel client3 = createClientMsgCh(proxyPort);
+    ClientMessageChannel client1 = createClientMsgCh();
+    ClientMessageChannel client2 = createClientMsgCh();
+    ClientMessageChannel client3 = createClientMsgCh();
+    
+    ConnectionInfo connectTo = new ConnectionInfo("localhost", proxyPort);
 
-    client1.open();
-    client2.open();
-    client3.open();
+    client1.open(connectTo);
+    client2.open(connectTo);
+    client3.open(connectTo);
 
     ThreadUtil.reallySleep(2000);
     assertTrue(client1.isConnected());
@@ -169,14 +167,15 @@ public class OOOReconnectTimeoutTest extends TCTestCase {
       ThreadUtil.reallySleep(5000);
     }
 
+    connectTo = new ConnectionInfo("localhost", serverPort);
     // case 3: connecting three more clients through server ports
-    ClientMessageChannel client4 = createClientMsgCh(serverPort);
-    ClientMessageChannel client5 = createClientMsgCh(serverPort);
-    ClientMessageChannel client6 = createClientMsgCh(serverPort);
+    ClientMessageChannel client4 = createClientMsgCh();
+    ClientMessageChannel client5 = createClientMsgCh();
+    ClientMessageChannel client6 = createClientMsgCh();
 
-    client4.open();
-    client5.open();
-    client6.open();
+    client4.open(connectTo);
+    client5.open(connectTo);
+    client6.open(connectTo);
 
     ThreadUtil.reallySleep(2000);
     assertTrue(client4.isConnected());

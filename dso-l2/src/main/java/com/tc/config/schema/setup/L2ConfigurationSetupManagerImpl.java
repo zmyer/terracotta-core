@@ -18,24 +18,20 @@
  */
 package com.tc.config.schema.setup;
 
+import com.tc.classloader.ServiceLocator;
 import com.tc.config.TcProperty;
 import com.tc.config.schema.ActiveServerGroupConfig;
-import com.tc.config.schema.ActiveServerGroupsConfig;
-import com.tc.config.schema.ActiveServerGroupsConfigObject;
+import com.tc.config.schema.ActiveServerGroupConfigObject;
 import com.tc.config.schema.CommonL2Config;
 import com.tc.config.schema.CommonL2ConfigObject;
 import com.tc.config.schema.ConfigTCProperties;
 import com.tc.config.schema.ConfigTCPropertiesFromObject;
-import com.tc.config.schema.setup.ConfigurationSetupException;
-import com.tc.management.TSAManagementEventPayload;
-import com.tc.management.TerracottaRemoteManagement;
 import com.tc.object.config.schema.L2Config;
 import com.tc.object.config.schema.L2ConfigObject;
-import com.tc.operatorevent.TerracottaOperatorEventFactory;
-import com.tc.operatorevent.TerracottaOperatorEventLogger;
 import com.tc.properties.TCProperties;
 import com.tc.properties.TCPropertiesImpl;
 import com.tc.server.ServerConnectionValidator;
+import com.tc.server.ServiceClassLoader;
 import com.tc.util.Assert;
 import org.terracotta.config.Server;
 import org.terracotta.config.Servers;
@@ -55,13 +51,14 @@ import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import org.terracotta.config.service.ServiceConfigParser;
+
 
 /**
  * The standard implementation of {@link com.tc.config.schema.setup.L2ConfigurationSetupManager}.
@@ -73,9 +70,9 @@ public class L2ConfigurationSetupManagerImpl extends BaseConfigurationSetupManag
   private final ConfigTCProperties configTCProperties;
   private final Set<InetAddress> localInetAddresses;
   private final TcConfiguration configuration;
+  private final ServiceLocator locator;
 
-  private volatile ActiveServerGroupsConfig activeServerGroupsConfig;
-  private volatile boolean secure;
+  private volatile ActiveServerGroupConfig activeServerGroupConfig;
 
   private Servers serversBean;
 
@@ -91,9 +88,9 @@ public class L2ConfigurationSetupManagerImpl extends BaseConfigurationSetupManag
     this.l2ConfigData = new HashMap<>();
 
     this.localInetAddresses = getAllLocalInetAddresses();
-
+    this.locator = new ServiceLocator(loader);
     // this sets the beans in each repository
-    runConfigurationCreator(loader);
+    runConfigurationCreator(new ServiceClassLoader(this.locator.getImplementations(ServiceConfigParser.class, loader)));
     this.configTCProperties = new ConfigTCPropertiesFromObject(tcPropertiesRepository());
     overwriteTcPropertiesFromConfig();
 
@@ -101,7 +98,6 @@ public class L2ConfigurationSetupManagerImpl extends BaseConfigurationSetupManag
 
 
     serversBean = serversBeanRepository();
-    this.secure = serversBean != null && serversBean.isSecure();
     Server[] servers = serversBean != null ? L2ConfigObject.getServers(serversBean) : null;
     Server server = null;
     if (thisL2Identifier != null) {
@@ -123,22 +119,16 @@ public class L2ConfigurationSetupManagerImpl extends BaseConfigurationSetupManag
 
     verifyL2Identifier(servers, this.thisL2Identifier);
     this.myConfigData = setupConfigDataForL2(this.thisL2Identifier);
-
-    this.activeServerGroupsConfig = new ActiveServerGroupsConfigObject(configuration.getPlatformConfiguration().getServers(), this);
-
-    // do this after servers and groups have been processed
-    validateGroups();
+    this.activeServerGroupConfig = new ActiveServerGroupConfigObject(configuration.getPlatformConfiguration().getServers(), this);
   }
 
   @Override
-  public TopologyReloadStatus reloadConfiguration(ServerConnectionValidator serverConnectionValidator,
-                                                  TerracottaOperatorEventLogger opEventLogger) throws ConfigurationSetupException {
+  public TopologyReloadStatus reloadConfiguration(ServerConnectionValidator serverConnectionValidator) throws ConfigurationSetupException {
     String reloadSource = configurationCreator().reloadServersConfiguration(false, false);
     Servers changedL2sBeanRepository = configurationCreator().getParsedConfiguration().getPlatformConfiguration().getServers();
-    opEventLogger.fireOperatorEvent(TerracottaOperatorEventFactory.createConfigReloadedEvent(reloadSource));
 
     TopologyVerifier topologyVerifier = new TopologyVerifier(serversBeanRepository(), changedL2sBeanRepository,
-                                                             this.activeServerGroupsConfig, serverConnectionValidator);
+                                                             this.activeServerGroupConfig, serverConnectionValidator);
     TopologyReloadStatus status = topologyVerifier.checkAndValidateConfig();
     if (TopologyReloadStatus.TOPOLOGY_CHANGE_ACCEPTABLE != status) { return status; }
 
@@ -146,17 +136,9 @@ public class L2ConfigurationSetupManagerImpl extends BaseConfigurationSetupManag
     this.l2ConfigData.clear();
 
     this.serversBean = configurationCreator().getParsedConfiguration().getPlatformConfiguration().getServers();
-    this.activeServerGroupsConfig = new ActiveServerGroupsConfigObject(serversBean, this);
-
-    TSAManagementEventPayload tsaManagementEventPayload = new TSAManagementEventPayload("TSA.TOPOLOGY.CONFIG_RELOADED");
-    TerracottaRemoteManagement.getRemoteManagementInstance().sendEvent(tsaManagementEventPayload.toManagementEvent());
+    this.activeServerGroupConfig = new ActiveServerGroupConfigObject(serversBean, this);
 
     return TopologyReloadStatus.TOPOLOGY_CHANGE_ACCEPTABLE;
-  }
-
-  @Override
-  public boolean isSecure() {
-    return secure;
   }
 
   @Override
@@ -182,41 +164,6 @@ public class L2ConfigurationSetupManagerImpl extends BaseConfigurationSetupManag
     }
   }
 
-  private void validateGroups() throws ConfigurationSetupException {
-    Server[] serverArray = L2ConfigObject.getServers(serversBeanRepository());
-    List<ActiveServerGroupConfig> groups = this.activeServerGroupsConfig.getActiveServerGroups();
-
-    validateGroupNames(groups);
-
-    for (Server server : serverArray) {
-      String serverName = server.getName();
-      boolean found = false;
-      int gid = -1;
-      for (ActiveServerGroupConfig groupConfig : groups) {
-        if (groupConfig.isMember(serverName)) {
-          if (found) { throw new ConfigurationSetupException("Server{" + serverName + "} is part of more than 1 mirror-group:  groups{"
-                                                             + gid + "," + groupConfig.getGroupId() + "}"); }
-          gid = groupConfig.getGroupId().toInt();
-          found = true;
-        }
-      }
-      if (!found) { throw new ConfigurationSetupException("Server{" + serverName + "} is not part of any mirror-group."); }
-    }
-  }
-
-  private void validateGroupNames(Collection<ActiveServerGroupConfig> groups) throws ConfigurationSetupException {
-    HashSet<String> groupNames = new HashSet<>();
-    for (ActiveServerGroupConfig element : groups) {
-      String grpName = element.getGroupName();
-      if (grpName != null) {
-        if (groupNames.contains(grpName)) { throw new ConfigurationSetupException("Group Name {" + grpName
-                                                                                  + "} is part of more than 1 mirror-group groups"); }
-        groupNames.add(grpName);
-      }
-    }
-  }
-
-
   private class L2ConfigData {
     private final String name;
     private final CommonL2Config commonL2Config;
@@ -225,7 +172,7 @@ public class L2ConfigurationSetupManagerImpl extends BaseConfigurationSetupManag
     public L2ConfigData(String name, Servers serversBean) throws ConfigurationSetupException {
       this.name = name;
       Server s = findMyL2Bean(); // To get the exception in case things are screwed up
-      this.commonL2Config = new CommonL2ConfigObject(s, configuration, secure);
+      this.commonL2Config = new CommonL2ConfigObject(s, configuration, false);
       this.dsoL2Config = new L2ConfigObject(s, serversBean.getClientReconnectWindow());
     }
 
@@ -396,18 +343,11 @@ public class L2ConfigurationSetupManagerImpl extends BaseConfigurationSetupManag
   }
 
   @Override
-  public ActiveServerGroupsConfig activeServerGroupsConfig() {
-    return activeServerGroupsConfig;
-  }
-
-  @Override
   public String[] allCurrentlyKnownServers() {
     List<String> servers = new ArrayList<>();
-    for (ActiveServerGroupConfig group : activeServerGroupsConfig.getActiveServerGroups()) {
-      for (String member : group.getMembers()) {
+      for (String member : activeServerGroupConfig.getMembers()) {
         servers.add(member);
       }
-    }
 
     return servers.toArray(new String[servers.size()]);
   }
@@ -466,7 +406,11 @@ public class L2ConfigurationSetupManagerImpl extends BaseConfigurationSetupManag
 
   @Override
   public ActiveServerGroupConfig getActiveServerGroupForThisL2() {
-    return this.activeServerGroupsConfig.getActiveServerGroupForL2(this.thisL2Identifier);
+    return this.activeServerGroupConfig;
   }
 
+  @Override
+  public ServiceLocator getServiceLocator() {
+    return this.locator;
+  }
 }

@@ -18,7 +18,7 @@
  */
 package com.tc.objectserver.entity;
 
-import com.tc.l2.msg.ReplicationMessage;
+import com.tc.l2.msg.SyncReplicationActivity;
 import com.tc.net.NodeID;
 import com.tc.util.Assert;
 import java.util.Collections;
@@ -32,7 +32,7 @@ public class NoReplicationBroker implements PassiveReplicationBroker {
   
   private boolean isActive = false;
   
-  public static final ActivePassiveAckWaiter NOOP_WAITER = new ActivePassiveAckWaiter(Collections.emptySet());
+  public static final ActivePassiveAckWaiter NOOP_WAITER = new ActivePassiveAckWaiter(Collections.emptySet(), null);
 
   @Override
   public void enterActiveState() {
@@ -47,7 +47,12 @@ public class NoReplicationBroker implements PassiveReplicationBroker {
   }
 
   @Override
-  public ActivePassiveAckWaiter replicateMessage(ReplicationMessage msg, Set<NodeID> passives) {
+  public ActivePassiveAckWaiter replicateActivity(SyncReplicationActivity activity, Set<NodeID> passives) {
     return NOOP_WAITER;
+  }
+
+  @Override
+  public void zapAndWait(NodeID node) {
+    //  do nothing
   }
 }

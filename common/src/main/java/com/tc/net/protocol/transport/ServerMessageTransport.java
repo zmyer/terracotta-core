@@ -18,8 +18,10 @@
  */
 package com.tc.net.protocol.transport;
 
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.tc.net.core.ConnectionInfo;
 import com.tc.net.core.TCConnection;
 import com.tc.net.core.event.TCConnectionEvent;
 import com.tc.net.protocol.NetworkStackID;
@@ -27,23 +29,21 @@ import com.tc.util.Assert;
 
 public class ServerMessageTransport extends MessageTransportBase {
 
-  private static final TCLogger smtLogger = TCLogging.getLogger(ServerMessageTransport.class);
+  private static final Logger smtLogger = LoggerFactory.getLogger(ServerMessageTransport.class);
 
-  public ServerMessageTransport(ConnectionID connectionID, TransportHandshakeErrorHandler handshakeErrorHandler,
+  public ServerMessageTransport(TransportHandshakeErrorHandler handshakeErrorHandler,
                                 TransportHandshakeMessageFactory messageFactory) {
     super(MessageTransportState.STATE_RESTART, handshakeErrorHandler, messageFactory, true, smtLogger);
-    this.connectionId = connectionID;
   }
 
   /**
    * Constructor for when you want a transport that you can specify a connection (e.g., in a server). This constructor
    * will create an open MessageTransport ready for use.
    */
-  public ServerMessageTransport(ConnectionID connectionId, TCConnection conn,
+  public ServerMessageTransport(TCConnection conn,
                                 TransportHandshakeErrorHandler handshakeErrorHandler,
                                 TransportHandshakeMessageFactory messageFactory) {
     super(MessageTransportState.STATE_START, handshakeErrorHandler, messageFactory, true, smtLogger);
-    this.connectionId = connectionId;
     Assert.assertNotNull(conn);
     wireNewConnection(conn);
   }
@@ -56,7 +56,7 @@ public class ServerMessageTransport extends MessageTransportBase {
   }
 
   @Override
-  public NetworkStackID open() {
+  public NetworkStackID open(ConnectionInfo info) {
     throw new UnsupportedOperationException("Server transport doesn't support open()");
   }
 
@@ -70,7 +70,7 @@ public class ServerMessageTransport extends MessageTransportBase {
     boolean notifyTransportConnected = false;
     boolean recycleAndReturn = false;
     synchronized (status) {
-      if (status.isStart()) {
+      if (status.isConnected()) {
         recycleAndReturn = true;
         notifyTransportConnected = verifyAndHandleAck(message);
       } else if (!status.isEstablished()) {
@@ -79,7 +79,7 @@ public class ServerMessageTransport extends MessageTransportBase {
          * reached the server, but worker thread might not have processed it yet and the OOOReconnectTimeout thread
          * pushed the Server Tx to closed state).
          */
-        logger.warn("Ignoring the message received for an Un-Established Connection; " + message.getSource() + "; "
+        logger.debug("Ignoring the message received for an Un-Established Connection; " + message.getSource() + "; "
                     + message);
         recycleAndReturn = true;
       }
@@ -115,9 +115,9 @@ public class ServerMessageTransport extends MessageTransportBase {
 
   private void handleAck(TransportHandshakeMessage ack) {
     synchronized (status) {
-      Assert.eval(status.isStart());
-      Assert.eval("Wrong connection ID: [" + this.connectionId + "] != [" + ack.getConnectionId() + "]",
-                  this.connectionId.equals(ack.getConnectionId()));
+      Assert.eval(status.isConnected());
+      Assert.eval("Wrong connection ID: [" + getConnectionId() + "] != [" + ack.getConnectionId() + "]",
+                  !getConnectionId().isValid() || getConnectionId().equals(ack.getConnectionId()));
       status.established();
       ack.getSource().setTransportEstablished();
     }
@@ -133,6 +133,7 @@ public class ServerMessageTransport extends MessageTransportBase {
     public void attachNewConnection(TCConnectionEvent closeEvent, TCConnection oldConnection, TCConnection newConnection) {
       Assert.assertNull(oldConnection);
       wireNewConnection(newConnection);
+      log("Attaching new connection to transport: " + newConnection);
     }
 
   }

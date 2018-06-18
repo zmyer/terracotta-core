@@ -19,6 +19,7 @@
 package com.tc.net.core;
 
 
+import com.tc.net.ClientID;
 import com.tc.net.ServerID;
 import com.tc.net.TCSocketAddress;
 import com.tc.net.protocol.NetworkStackHarnessFactory;
@@ -39,7 +40,6 @@ import com.tc.net.protocol.tcm.TCMessage;
 import com.tc.net.protocol.tcm.TCMessageRouterImpl;
 import com.tc.net.protocol.tcm.TCMessageType;
 import com.tc.net.protocol.transport.ClientConnectionEstablisher;
-import com.tc.net.protocol.transport.ConnectionID;
 import com.tc.net.protocol.transport.DefaultConnectionIdFactory;
 import com.tc.net.protocol.transport.HealthCheckerConfigImpl;
 import com.tc.net.protocol.transport.NullConnectionPolicy;
@@ -53,6 +53,7 @@ import com.tc.util.PortChooser;
 import com.tc.util.concurrent.ThreadUtil;
 import com.tc.util.runtime.ThreadDumpUtil;
 import com.tc.properties.TCPropertiesConsts;
+import com.tc.util.ProductID;
 
 import java.net.InetAddress;
 import java.util.Collections;
@@ -85,23 +86,18 @@ public class NoReconnectThreadTest extends TCTestCase implements ChannelEventLis
     return networkStackHarnessFactory;
   }
 
-  private ClientMessageChannel createClientMsgCh(int port) {
-    return createClientMsgCh(port, false);
+  private ClientMessageChannel createClientMsgCh() {
+    return createClientMsgCh(false);
   }
 
-  private ClientMessageChannel createClientMsgCh(int port, boolean ooo) {
+  private ClientMessageChannel createClientMsgCh(boolean ooo) {
 
     CommunicationsManager clientComms = new CommunicationsManagerImpl("TestCommsMgr", new NullMessageMonitor(),
                                                                       getNetworkStackHarnessFactory(ooo),
                                                                       new NullConnectionPolicy());
     ClientMessageChannel clientMsgCh = clientComms
-        .createClientChannel(new NullSessionManager(),
-                             0,
-                             "localhost",
-                             port,
-                             1000,
-                             new ConnectionAddressProvider(
-                                                           new ConnectionInfo[] { new ConnectionInfo("localhost", port) }));
+        .createClientChannel(ProductID.SERVER, new NullSessionManager(),
+                             1000);
     return clientMsgCh;
   }
 
@@ -119,29 +115,31 @@ public class NoReconnectThreadTest extends TCTestCase implements ChannelEventLis
                                                                          new ServerID(),
                                                                          new TransportHandshakeErrorNullHandler(),
                                                                          Collections.<TCMessageType, Class<? extends TCMessage>>emptyMap(),
-                                                                         Collections.<TCMessageType, GeneratedMessageFactory>emptyMap(),
-                                                                         null);
-    NetworkListener listener = serverCommsMgr.createListener(new NullSessionManager(), new TCSocketAddress(0), true,
-                                                             new DefaultConnectionIdFactory());
-    listener.start(Collections.<ConnectionID>emptySet());
+                                                                         Collections.<TCMessageType, GeneratedMessageFactory>emptyMap()
+    );
+    NetworkListener listener = serverCommsMgr.createListener(new TCSocketAddress(0), true,
+                                                             new DefaultConnectionIdFactory(), (t)->true);
+    listener.start(Collections.<ClientID>emptySet());
     int serverPort = listener.getBindPort();
 
     int proxyPort = new PortChooser().chooseRandomPort();
     TCPProxy proxy = new TCPProxy(proxyPort, InetAddress.getByName("localhost"), serverPort, 0, false, null);
     proxy.start();
 
-    ClientMessageChannel client1 = createClientMsgCh(proxyPort);
-    ClientMessageChannel client2 = createClientMsgCh(proxyPort);
-    ClientMessageChannel client3 = createClientMsgCh(proxyPort);
+    ClientMessageChannel client1 = createClientMsgCh();
+    ClientMessageChannel client2 = createClientMsgCh();
+    ClientMessageChannel client3 = createClientMsgCh();
+    
+    ConnectionInfo info = new ConnectionInfo("localhost", proxyPort);
 
     client1.addListener(this);
-    client1.open();
+    client1.open(info);
 
     client2.addListener(this);
-    client2.open();
+    client2.open(info);
 
     client3.addListener(this);
-    client3.open();
+    client3.open(info);
 
     ThreadUtil.reallySleep(2000);
     assertTrue(client1.isConnected());
@@ -181,29 +179,31 @@ public class NoReconnectThreadTest extends TCTestCase implements ChannelEventLis
                                                                          new ServerID(),
                                                                          new TransportHandshakeErrorNullHandler(),
                                                                          Collections.<TCMessageType, Class<? extends TCMessage>>emptyMap(),
-                                                                         Collections.<TCMessageType, GeneratedMessageFactory>emptyMap(),
-                                                                         null);
-    NetworkListener listener = serverCommsMgr.createListener(new NullSessionManager(), new TCSocketAddress(0), true,
-                                                             new DefaultConnectionIdFactory());
-    listener.start(Collections.<ConnectionID>emptySet());
+                                                                         Collections.<TCMessageType, GeneratedMessageFactory>emptyMap()
+    );
+    NetworkListener listener = serverCommsMgr.createListener(new TCSocketAddress(0), true,
+                                                             new DefaultConnectionIdFactory(), (t)->true);
+    listener.start(Collections.<ClientID>emptySet());
     int serverPort = listener.getBindPort();
 
     int proxyPort = new PortChooser().chooseRandomPort();
     TCPProxy proxy = new TCPProxy(proxyPort, InetAddress.getByName("localhost"), serverPort, 0, false, null);
     proxy.start();
 
-    ClientMessageChannel client1 = createClientMsgCh(proxyPort, true);
-    ClientMessageChannel client2 = createClientMsgCh(proxyPort, true);
-    ClientMessageChannel client3 = createClientMsgCh(proxyPort, true);
+    ClientMessageChannel client1 = createClientMsgCh(true);
+    ClientMessageChannel client2 = createClientMsgCh(true);
+    ClientMessageChannel client3 = createClientMsgCh(true);
+    
+    ConnectionInfo info = new ConnectionInfo("localhost", proxyPort);
 
     client1.addListener(this);
-    client1.open();
+    client1.open(info);
 
     client2.addListener(this);
-    client2.open();
+    client2.open(info);
 
     client3.addListener(this);
-    client3.open();
+    client3.open(info);
 
     ThreadUtil.reallySleep(2000);
     assertTrue(client1.isConnected());

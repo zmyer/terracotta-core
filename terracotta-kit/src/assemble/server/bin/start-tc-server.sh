@@ -27,28 +27,30 @@ case "$1" in
     ;;
 esac
 
+TC_SERVER_DIR=$(dirname "$(cd "$(dirname "$0")";pwd)")
+PLUGIN_LIB_DIR="${TC_SERVER_DIR}/plugins/lib"
+PLUGIN_API_DIR="${TC_SERVER_DIR}/plugins/api"
 
+# this will only happen if using sag installer
+if [ -r "${TC_SERVER_DIR}/bin/setenv.sh" ] ; then
+  . "${TC_SERVER_DIR}/bin/setenv.sh"
+fi
 
-THIS_DIR=`dirname $0`
-TC_INSTALL_DIR=`cd $THIS_DIR;pwd`/../..
-PLUGIN_LIB_DIR="$TC_INSTALL_DIR/server/plugins/lib"
-PLUGIN_API_DIR="$TC_INSTALL_DIR/server/plugins/api"
-
-if test \! -d "${JAVA_HOME}"; then
+if ! [ -d "${JAVA_HOME}" ]; then
   echo "$0: the JAVA_HOME environment variable is not defined correctly"
   exit 2
 fi
 
-
-for JAVA_COMMAND in \
-"${JAVA_HOME}/bin/java -d64 -server -XX:MaxDirectMemorySize=9223372036854775807" \
-"${JAVA_HOME}/bin/java -server -XX:MaxDirectMemorySize=9223372036854775807" \
-"${JAVA_HOME}/bin/java -d64 -client  -XX:MaxDirectMemorySize=9223372036854775807" \
-"${JAVA_HOME}/bin/java -client -XX:MaxDirectMemorySize=9223372036854775807" \
-"${JAVA_HOME}/bin/java -XX:MaxDirectMemorySize=9223372036854775807"
+# Determine supported JVM args
+for JAVA_COMMAND_ARGS in \
+    "-d64 -server -XX:MaxDirectMemorySize=1048576g" \
+    "-server -XX:MaxDirectMemorySize=1048576g" \
+    "-d64 -client  -XX:MaxDirectMemorySize=1048576g" \
+    "-client -XX:MaxDirectMemorySize=1048576g" \
+    "-XX:MaxDirectMemorySize=1048576g"
 do
-  ${JAVA_COMMAND} -version > /dev/null 2>&1
-  if test "$?" = "0" ; then break; fi
+    # accept the first one that works
+    "${JAVA_HOME}/bin/java" $JAVA_COMMAND_ARGS -version > /dev/null 2>&1 && break
 done
 
 function setPluginClasspath {
@@ -57,19 +59,20 @@ function setPluginClasspath {
 
     for pluginDir in "${PLUGIN_LIB_DIR}" "${PLUGIN_API_DIR}"
     do
-        if [ -e "${pluginDir}" ]
+        if [ -d "${pluginDir}" ]
         then
             for jarFile in "${pluginDir}"/*.jar
             do
-                PLUGIN_CLASSPATH=${PLUGIN_CLASSPATH}:${jarFile}
+                PLUGIN_CLASSPATH="${PLUGIN_CLASSPATH}:${jarFile}"
             done
-#  Adding SLF4j libraries to the classpath of the server to 
-#  support services that may use SLF4j for logging
-            for jarFile in "${TC_INSTALL_DIR}"/server/lib/slf4j*.jar
-            do
-                PLUGIN_CLASSPATH=${PLUGIN_CLASSPATH}:${jarFile}
-            done
+
         fi
+    done
+    #  Adding SLF4j libraries to the classpath of the server to
+    #  support services that may use SLF4j for logging
+    for jarFile in "${TC_SERVER_DIR}"/lib/slf4j*.jar
+    do
+        PLUGIN_CLASSPATH="${PLUGIN_CLASSPATH}:${jarFile}"
     done
 
     shopt -u nullglob
@@ -78,28 +81,24 @@ function setPluginClasspath {
 
 setPluginClasspath;
 
+PLUGIN_CLASSPATH="${PLUGIN_CLASSPATH}:${TC_SERVER_DIR}/lib"
+
 #rmi.dgc.server.gcInterval is set an year to avoid system gc in case authentication is enabled
 #users may change it accordingly
-start=true
-while "$start"
-do
+while [ 1 ] ; do
 # the solaris 64-bit JVM has a bug that makes it fail to allocate more than 2GB of offheap when
 # the max heap is <= 2G, hence we set the heap size to a bit more than 2GB
-${JAVA_COMMAND} -Xms256m -Xmx2049m -XX:+HeapDumpOnOutOfMemoryError \
-   -Dcom.sun.management.jmxremote \
-   -Dtc.install-root="${TC_INSTALL_DIR}" \
-   -Dsun.rmi.dgc.server.gcInterval=31536000000\
-   ${JAVA_OPTS} \
-   -cp "${TC_INSTALL_DIR}/server/lib/tc.jar:${PLUGIN_CLASSPATH}" \
-   com.tc.server.TCServerMain "$@"
- exitValue=$?
- start=false;
+    "${JAVA_HOME}/bin/java" $JAVA_COMMAND_ARGS -Xms256m -Xmx2049m -XX:+HeapDumpOnOutOfMemoryError \
+        -Dtc.install-root="${TC_SERVER_DIR}" \
+        ${JAVA_OPTS} \
+        -cp "${TC_SERVER_DIR}/lib/tc.jar:${PLUGIN_CLASSPATH}" \
+        com.tc.server.TCServerMain "$@"
+    exitValue=$?
 
- if test "$exitValue" = "11"; then
-   start=true;
-   echo "start-tc-server: Restarting the server..."
- else
-   exit $exitValue
- fi
+    if [ $exitValue -eq 11 ] ; then
+        echo "$0: Restarting server"
+        sleep 1
+    else
+        exit $exitValue
+    fi
 done
-

@@ -7,8 +7,6 @@ package com.tc.classloader;
 import static com.tc.config.Directories.TC_INSTALL_ROOT_PROPERTY_NAME;
 
 import com.tc.config.Directories;
-import com.tc.logging.TCLogging;
-import com.tc.logging.TCLoggingService;
 import com.tc.util.Assert;
 import com.tc.util.ZipBuilder;
 import java.io.ByteArrayOutputStream;
@@ -19,6 +17,7 @@ import java.io.InputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import org.junit.After;
@@ -89,7 +88,7 @@ public class ServiceLocatorTest {
      Assert.assertEquals(interi.getClassLoader(), component);
      
      Thread.currentThread().setContextClassLoader(apiLoader);
-     List<Class<? extends Runnable>> list = ServiceLocator.getImplementations(Runnable.class);
+     List<Class<? extends Runnable>> list = new ServiceLocator(apiLoader).getImplementations(Runnable.class, apiLoader);
      for (Class<? extends Runnable> r : list) {
        r.newInstance().run();
      }
@@ -105,18 +104,8 @@ public class ServiceLocatorTest {
 //  put it in the zip so null parent loader can find it
      zip.putEntry("com/tc/classloader/TestInterface.class", resourceToBytes("com/tc/classloader/TestInterface.class"));
      zip.finish();
-     Map<String, String> map = ServiceLocator.discoverImplementations(new URLClassLoader(new URL[] {test.toURI().toURL()}), "com.tc.classloader.TestInterface");
+     Collection<Class<?>> map = new ServiceLocator(new URLClassLoader(new URL[] {test.toURI().toURL()})).testingCheckUrls("com.tc.classloader.TestInterface");
      Assert.assertTrue(map.size() == 1);
-     try {
-       ClassLoader loader = new URLClassLoader(new URL[] {new URL(map.get("com.tc.classloader.TestInterfaceImpl").toString())}, null);
-       Class<?> c = loader.loadClass("com.tc.classloader.TestInterfaceImpl");
-       Assert.assertNotNull(c);
-     } catch (MalformedURLException m) {
-//  not expected
-       throw m;
-     } catch (ClassNotFoundException c) {
-       throw c;
-     } 
    }
    
    @Test
@@ -135,18 +124,13 @@ public class ServiceLocatorTest {
      impl.write(resourceToBytes("com/tc/classloader/TestInterface.class"));
      impl.close();
      
-     Map<String, String> map = ServiceLocator.discoverImplementations(new URLClassLoader(new URL[] {base.toURI().toURL()}), "com.tc.classloader.TestInterface");
-     Assert.assertTrue(map.size() == 1);
      try {
-       ClassLoader loader = new URLClassLoader(new URL[] {new URL(map.get("com.tc.classloader.TestInterfaceImpl").toString())}, null);
-       Class<?> c = loader.loadClass("com.tc.classloader.TestInterfaceImpl");
-       Assert.assertNotNull(c);
-     } catch (MalformedURLException m) {
-//  not expected
-       throw m;
-     } catch (ClassNotFoundException c) {
-       throw c;
-     } 
+       Collection<Class<?>> map = new ServiceLocator(new URLClassLoader(new URL[] {base.toURI().toURL()})).testingCheckUrls("com.tc.classloader.TestInterface");
+       Assert.assertTrue(map.size() == 1);
+     } catch (Throwable t) {
+       t.printStackTrace();
+       throw t;
+     }
    }
    
    private File writeZip(File api, String...classes) throws IOException {
@@ -180,65 +164,4 @@ public class ServiceLocatorTest {
      fos.write(resourceToBytes(className + ".class"));
      fos.close();
    }
-
-  @Test
-  public void testLogging() throws Exception {
-    TCLoggingService prevLoggingService = TCLogging.getLoggingService();
-    TestLoggingService testLoggingService = new TestLoggingService();
-    TCLogging.setLoggingService(testLoggingService);
-
-    // test
-    File lib = null;
-    try {
-      File f = folder.newFolder();
-      lib = new File(f, Directories.SERVER_PLUGIN_LIB_DIR);
-      File meta = new File(lib, "META-INF/services");
-      meta.mkdirs();
-      File api = new File(f, Directories.SERVER_PLUGIN_API_DIR);
-      api.mkdirs();
-      writeClass(lib, "com.tc.classloader.TestInterfaceImpl");
-      writeClass(lib, "com.tc.classloader.TestInterfaceHandle");
-      File testApi = writeZip(new File(api, "test.jar"), "com.tc.classloader.TestInterface");
-      System.setProperty(TC_INSTALL_ROOT_PROPERTY_NAME, f.getAbsolutePath());
-
-      ClassLoader testloader = new URLClassLoader(new URL[] {lib.toURI().toURL()}, this.getClass().getClassLoader());
-      ClassLoader apiLoader = new ApiClassLoader(new URL[] {testApi.toURI().toURL()}, testloader);
-
-      FileOutputStream services1 = new FileOutputStream(new File(meta, "com.tc.classloader.TestInterface"));
-      services1.write("com.tc.classloader.TestInterfaceImpl".getBytes());
-      services1.close();
-      FileOutputStream services2 = new FileOutputStream(new File(meta, "java.lang.Runnable"));
-      services2.write("com.tc.classloader.TestInterfaceHandle".getBytes());
-      services2.close();
-      ComponentURLClassLoader component = new ComponentURLClassLoader(new URL[] {lib.toURI().toURL()},
-        apiLoader,
-        new AnnotationOrDirectoryStrategyChecker());
-      Class<?> interf = component.loadClass("com.tc.classloader.TestInterface");
-      Class<?> interi = component.loadClass("com.tc.classloader.TestInterfaceImpl");
-      Assert.assertTrue(interf.getClassLoader() instanceof ApiClassLoader);
-      Assert.assertEquals(interf.getClassLoader(), apiLoader);
-      Assert.assertEquals(interi.getClassLoader(), component);
-
-      Thread.currentThread().setContextClassLoader(apiLoader);
-      List<Class<? extends Runnable>> list = ServiceLocator.getImplementations(Runnable.class);
-      for (Class<? extends Runnable> r : list) {
-        r.newInstance().run();
-      }
-    } finally {
-      TCLogging.setLoggingService(prevLoggingService);
-    }
-
-    boolean foundLogMessage = false;
-    for(Object object : testLoggingService.getLogger(ServiceLocator.class).getLogs()) {
-      if(object instanceof String) {
-        String logMessage = (String) object;
-        if(lib != null && logMessage.contains("Entity/Service implementations will be loaded from " + lib.getAbsolutePath())) {
-          foundLogMessage = true;
-        }
-      }
-      if(foundLogMessage) break;
-    }
-
-    Assert.assertTrue(foundLogMessage);
-  }
 }

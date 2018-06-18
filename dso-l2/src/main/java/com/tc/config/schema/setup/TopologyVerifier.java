@@ -18,11 +18,12 @@
  */
 package com.tc.config.schema.setup;
 
+import com.tc.config.schema.ActiveServerGroupConfig;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.terracotta.config.Servers;
 
-import com.tc.config.schema.ActiveServerGroupsConfig;
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
 import com.tc.server.ServerConnectionValidator;
 
 import java.util.Set;
@@ -31,13 +32,13 @@ import java.util.Set;
 public class TopologyVerifier {
   private final Servers                   oldServersBean;
   private final Servers                   newServersBean;
-  private final ActiveServerGroupsConfig  oldGroupsInfo;
+  private final ActiveServerGroupConfig  oldGroupsInfo;
   private final ServerConnectionValidator serverConnectionValidator;
 
-  private static final TCLogger           logger = TCLogging.getLogger(TopologyVerifier.class);
+  private static final Logger logger = LoggerFactory.getLogger(TopologyVerifier.class);
 
   TopologyVerifier(Servers oldServers, Servers newServers,
-                   ActiveServerGroupsConfig oldGroupsInfo, ServerConnectionValidator serverConnectionValidator) {
+                   ActiveServerGroupConfig oldGroupsInfo, ServerConnectionValidator serverConnectionValidator) {
     this.oldServersBean = oldServers;
     this.newServersBean = newServers;
     this.oldGroupsInfo = oldGroupsInfo;

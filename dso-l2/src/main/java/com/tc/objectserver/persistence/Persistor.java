@@ -18,15 +18,18 @@
  */
 package com.tc.objectserver.persistence;
 
+import com.tc.net.ClientID;
+import com.tc.objectserver.api.ClientNotFoundException;
 import com.tc.text.PrettyPrintable;
-import com.tc.text.PrettyPrinter;
+import com.tc.util.ProductID;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import org.terracotta.persistence.IPlatformPersistence;
 
 
 public class Persistor implements PrettyPrintable {
   private final IPlatformPersistence persistentStorage;
-  private boolean wasDBClean;
 
   private volatile boolean started = false;
 
@@ -42,14 +45,40 @@ public class Persistor implements PrettyPrintable {
     this.entityPersistor = new EntityPersistor(persistentStorage);
   }
 
-  public void start() {
+  public boolean start(boolean trackClients) {
     clientStatePersistor = new ClientStatePersistor(persistentStorage);
-    this.transactionOrderPersistor = new TransactionOrderPersistor(persistentStorage, this.clientStatePersistor.loadClientIDs());
-    wasDBClean = this.clusterStatePersistor.isDBClean();
+    this.transactionOrderPersistor = new TransactionOrderPersistor(persistentStorage, this.clientStatePersistor.loadPermanentClientIDs());
+    for (ClientID orphan : clientStatePersistor.loadOrphanClientIDs()) {
+      try {
+        removeClientState(orphan);
+      } catch (ClientNotFoundException notfound) {
+        // do nothing
+      }
+    }
+    //  remove any entries in the entity journal, clients aren't tracked
+    if (!trackClients) {
+      entityPersistor.clearEntityClientJournal();
+    }
+    boolean wasDBClean = this.clusterStatePersistor.isDBClean();
     started = true;
+    return wasDBClean;
   }
 
   public void close() {
+  }
+  
+  public void addClientState(ClientID node, ProductID product) {
+    clientStatePersistor.saveClientState(node, product);
+    entityPersistor.addTrackingForClient(node);
+    transactionOrderPersistor.addTrackingForClient(node, product);
+  }
+  
+  public void removeClientState(ClientID node) throws ClientNotFoundException {
+    //  removing the client state.  threading doesn't matter here.  A client that is gone will never come back
+    //  code the underlying defensively to handle the fact that the client is gone
+    transactionOrderPersistor.removeTrackingForClient(node);
+    entityPersistor.removeTrackingForClient(node);
+    clientStatePersistor.deleteClientState(node);
   }
   
   public ClientStatePersistor getClientStatePersistor() {
@@ -75,18 +104,32 @@ public class Persistor implements PrettyPrintable {
     }
   }
 
-  public boolean wasDBClean() {
-    return wasDBClean;
-  }
-
   @Override
-  public PrettyPrinter prettyPrint(PrettyPrinter out) {
-    out.print(getClass().getName()).flush();
-    if (!started) {
-      out.indent().print("PersistorImpl not started.").flush();
-    } else {
-      out.println(persistentStorage);
+  public Map<String, ?> getStateMap() {
+    Map<String,Object> map = new LinkedHashMap<>();
+    map.put("className", this.getClass().getName());
+    map.put("started", started);
+
+    if(clusterStatePersistor != null) {
+      Map<String,Object> substate = new LinkedHashMap<>();
+      map.put("clusterState", substate);
+      clusterStatePersistor.reportStateToMap(substate);
     }
-    return out;
+    if(entityPersistor != null) {
+      Map<String,Object> substate = new LinkedHashMap<>();
+      map.put("entityPersistor", substate);
+      entityPersistor.reportStateToMap(substate);
+    }
+    if(clientStatePersistor != null) {
+      Map<String,Object> substate = new LinkedHashMap<>();
+      map.put("clientPersistor", substate);
+      clientStatePersistor.reportStateToMap(substate);
+    }
+    if(transactionOrderPersistor != null) {
+      Map<String,Object> substate = new LinkedHashMap<>();
+      map.put("orderPersistor", substate);
+      transactionOrderPersistor.reportStateToMap(substate);
+    }
+    return map;
   }
 }

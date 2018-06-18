@@ -23,15 +23,42 @@ package com.tc.util;
  * @author tim
  */
 public enum ProductID {
-  TMS(true), WAN(true), USER(false);
+  DIAGNOSTIC(true, false, false, false), 
+  INFORMATIONAL(true, true, true, false), 
+  STRIPE(false, true, true, false), 
+  SERVER(false, false, true, false), 
+  PERMANENT(false, true, true, true);
 
   private final boolean internal;
+  private final boolean reconnect;
+  private final boolean redirect;
+  private final boolean permanent;
 
-  ProductID(boolean internal) {
+  ProductID(boolean internal, boolean reconnect, boolean redirect, boolean permanent) {
     this.internal = internal;
+    this.reconnect = reconnect;
+    this.redirect = redirect;
+    this.permanent = permanent;
   }
 
   public boolean isInternal() {
     return internal;
+  }
+  
+  public boolean isReconnectEnabled() {
+    return reconnect;
+  }
+
+  public boolean isRedirectEnabled() {
+    return redirect;
+  }
+  
+  public boolean isPermanent() {
+    return permanent;
+  }
+  
+  @Override
+  public String toString() {
+    return name().charAt(0) + name().substring(1).toLowerCase();
   }
 }

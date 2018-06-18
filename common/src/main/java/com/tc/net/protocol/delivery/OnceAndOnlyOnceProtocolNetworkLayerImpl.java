@@ -18,12 +18,14 @@
  */
 package com.tc.net.protocol.delivery;
 
+import org.slf4j.LoggerFactory;
+
 import com.tc.bytes.TCByteBuffer;
 import com.tc.exception.TCRuntimeException;
-import com.tc.logging.TCLogging;
 import com.tc.net.CommStackMismatchException;
 import com.tc.net.MaxConnectionsExceededException;
 import com.tc.net.TCSocketAddress;
+import com.tc.net.core.ConnectionInfo;
 import com.tc.net.core.TCConnection;
 import com.tc.net.protocol.NetworkLayer;
 import com.tc.net.protocol.NetworkStackID;
@@ -77,7 +79,7 @@ public class OnceAndOnlyOnceProtocolNetworkLayerImpl extends AbstractMessageTran
                                                  OOOProtocolMessageParser messageParser,
                                                  ReconnectConfig reconnectConfig, boolean isClient,
                                                  Timer restoreConnectTimer) {
-    super(TCLogging.getLogger(OnceAndOnlyOnceProtocolNetworkLayerImpl.class));
+    super(LoggerFactory.getLogger(OnceAndOnlyOnceProtocolNetworkLayerImpl.class));
     this.messageFactory = messageFactory;
     this.messageParser = messageParser;
     this.isClient = isClient;
@@ -287,10 +289,10 @@ public class OnceAndOnlyOnceProtocolNetworkLayerImpl extends AbstractMessageTran
   }
 
   @Override
-  public NetworkStackID open() throws TCTimeoutException, UnknownHostException, IOException,
+  public NetworkStackID open(ConnectionInfo info) throws TCTimeoutException, UnknownHostException, IOException,
       MaxConnectionsExceededException, CommStackMismatchException {
     Assert.assertNotNull(sendLayer);
-    return sendLayer.open();
+    return sendLayer.open(info);
   }
 
   @Override

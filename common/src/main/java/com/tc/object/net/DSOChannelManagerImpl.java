@@ -18,8 +18,9 @@
  */
 package com.tc.object.net;
 
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.tc.net.ClientID;
 import com.tc.net.NodeID;
 import com.tc.net.TCSocketAddress;
@@ -46,7 +47,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * clients and hides the channel to client ID mapping from the rest of the world.
  */
 public class DSOChannelManagerImpl implements DSOChannelManager, DSOChannelManagerMBean {
-  private static final TCLogger      logger         = TCLogging.getLogger(DSOChannelManager.class);
+  private static final Logger logger = LoggerFactory.getLogger(DSOChannelManager.class);
 
   private final CopyOnWriteSequentialMap<NodeID, MessageChannel> activeChannels = new CopyOnWriteSequentialMap<NodeID, MessageChannel>(
                                                                                       new CopyOnWriteSequentialMap.TypedArrayFactory() {
@@ -135,13 +136,13 @@ public class DSOChannelManagerImpl implements DSOChannelManager, DSOChannelManag
   }
 
   @Override
-  public void makeChannelActive(ClientID clientID, boolean persistent) {
+  public void makeChannelActive(ClientID clientID) {
     try {
       ClientHandshakeAckMessage ackMsg = newClientHandshakeAckMessage(clientID);
       MessageChannel channel = ackMsg.getChannel();
       synchronized (activeChannels) {
         activeChannels.put(clientID, channel);
-        ackMsg.initialize(persistent, getAllActiveClientIDs(), clientID, serverVersion);
+        ackMsg.initialize(getAllActiveClientIDs(), clientID, serverVersion);
         if (!ackMsg.send()) {
           logger.warn("Not sending handshake message to disconnected client: " + clientID);
         }
@@ -159,13 +160,12 @@ public class DSOChannelManagerImpl implements DSOChannelManager, DSOChannelManag
       synchronized (activeChannels) {
         handshakeRefuseMsg.initialize(message);
         if (!handshakeRefuseMsg.send()) {
-          logger.warn("Not sending handshake rejeceted message to disconnected client: " + clientID);
+          logger.warn("Not sending handshake rejected message to disconnected client: " + clientID);
         }
       }
     } catch (NoSuchChannelException nsce) {
-      logger.warn("Not sending handshake rejeceted message to disconnected client: " + clientID);
+      logger.warn("Not sending handshake rejected message to disconnected client: " + clientID);
     }
-
   }
 
   private Set<? extends NodeID> getAllActiveClientIDs() {
@@ -204,8 +204,9 @@ public class DSOChannelManagerImpl implements DSOChannelManager, DSOChannelManag
   }
 
   private void fireChannelRemovedEvent(MessageChannel channel) {
+    boolean isActive = isActiveID(channel.getRemoteNodeID());
     for (DSOChannelManagerEventListener eventListener : eventListeners) {
-      eventListener.channelRemoved(channel);
+      eventListener.channelRemoved(channel, isActive);
     }
   }
 

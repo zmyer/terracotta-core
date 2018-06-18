@@ -18,33 +18,38 @@
  */
 package com.tc.objectserver.entity;
 
-import com.tc.async.api.Sink;
-import com.tc.l2.msg.PassiveSyncMessage;
-import com.tc.l2.msg.ReplicationEnvelope;
-import com.tc.l2.msg.ReplicationMessage;
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.tc.l2.ha.L2HAZapNodeRequestProcessor;
+import com.tc.l2.msg.ReplicationAckTuple;
+import com.tc.l2.msg.ReplicationMessageAck;
+import com.tc.l2.msg.ReplicationResultCode;
+import com.tc.l2.msg.SyncReplicationActivity;
 import com.tc.net.NodeID;
 import com.tc.net.groups.GroupEventsListener;
-import com.tc.net.groups.GroupMessage;
-import com.tc.net.groups.MessageID;
+import com.tc.net.groups.GroupManager;
 import com.tc.objectserver.api.ManagedEntity;
 import com.tc.objectserver.handler.ProcessTransactionHandler;
-import com.tc.objectserver.handler.ReplicationSender;
 import com.tc.objectserver.persistence.EntityPersistor;
 import com.tc.util.Assert;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.ObjectOutputStream;
+import java.util.ArrayList;
 import java.util.Collections;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Semaphore;
+import java.util.function.Consumer;
+import com.tc.l2.state.ConsistencyManager;
+import com.tc.l2.state.ServerMode;
+import java.util.concurrent.TimeUnit;
 
 
 /**
@@ -55,22 +60,43 @@ import java.util.concurrent.Semaphore;
  */
 public class ActiveToPassiveReplication implements PassiveReplicationBroker, GroupEventsListener {
   
-  private static final TCLogger logger           = TCLogging.getLogger(PassiveReplicationBroker.class);
-  private final Iterable<ManagedEntity> entities;
+  private static final Logger logger = LoggerFactory.getLogger(PassiveReplicationBroker.class);
   private final Iterable<NodeID> passives;
   private boolean activated = false;
   private final Set<NodeID> passiveNodes = new CopyOnWriteArraySet<>();
   private final Set<NodeID> standByNodes = new HashSet<>();
-  private final ConcurrentHashMap<MessageID, ActivePassiveAckWaiter> waiters = new ConcurrentHashMap<>();
-  private final Sink<ReplicationEnvelope> replicate;
+  private final ConcurrentHashMap<SyncReplicationActivity.ActivityID, ActivePassiveAckWaiter> waiters = new ConcurrentHashMap<>();
+  private final ReplicationSender replicationSender;
   private final Executor passiveSyncPool = Executors.newCachedThreadPool();
   private final EntityPersistor persistor;
+  private final GroupManager serverCheck;
+  private final ProcessTransactionHandler snapshotter;
+  private final ConsistencyManager consistencyMgr;
 
-  public ActiveToPassiveReplication(Iterable<NodeID> passives, Iterable<ManagedEntity> entities, EntityPersistor persistor, Sink<ReplicationEnvelope> replicate) {
-    this.entities = entities;
-    this.replicate = replicate;
+  public ActiveToPassiveReplication(ConsistencyManager consistencyMgr, ProcessTransactionHandler snapshotter, Iterable<NodeID> passives, EntityPersistor persistor, ReplicationSender replicationSender, GroupManager serverMatch) {
+    this.consistencyMgr = consistencyMgr;
+    this.replicationSender = replicationSender;
     this.passives = passives;
     this.persistor = persistor;
+    this.serverCheck = serverMatch;
+    this.snapshotter = snapshotter;
+  }
+
+  @Override
+  public void zapAndWait(NodeID node) {
+    synchronized(this.standByNodes) {
+      logger.warn("ZAPPING " + node + " due to inconsistent lifecycle result");
+      try {
+        if (this.standByNodes.contains(node)) {
+          this.serverCheck.zapNode(node,  L2HAZapNodeRequestProcessor.PROGRAM_ERROR, "inconsistent lifecycle");
+        }
+        while (this.standByNodes.contains(node)) {
+          this.standByNodes.wait();
+        }
+      } catch (InterruptedException ie) {
+        Thread.currentThread().interrupt();
+      }
+    }
   }
   
   @Override
@@ -96,11 +122,11 @@ public class ActiveToPassiveReplication implements PassiveReplicationBroker, Gro
  */
   private boolean prime(NodeID node) {
     if (!passiveNodes.contains(node)) {
-      logger.info("Starting message sequence on " + node);
-      ReplicationMessage resetOrderedSink = ReplicationMessage.createStartMessage();
-      Semaphore block = new Semaphore(0);
-      replicate.addSingleThreaded(resetOrderedSink.target(node,()->block.release()));
-      waitOnSemaphore(block);
+      if (!consistencyMgr.requestTransition(ServerMode.ACTIVE, node, ConsistencyManager.Transition.ADD_PASSIVE)) {
+        serverCheck.zapNode(node, L2HAZapNodeRequestProcessor.SPLIT_BRAIN, "unable to verify active");
+      }
+      logger.debug("Starting message sequence on " + node);
+      this.replicationSender.addPassive(node, SyncReplicationActivity.createStartMessage());
       return true;
     } else {
       return false;
@@ -119,29 +145,39 @@ public class ActiveToPassiveReplication implements PassiveReplicationBroker, Gro
   }
   /**
    * Using an executor service here to sync multiple passives at once
-   * @param groups
-   * @param newNode 
+   * @param newNode
    */
   private void executePassiveSync(final NodeID newNode) {
-    passiveSyncPool.execute(new Runnable() {
-      @Override
-      public void run() {    
-        // start passive sync message
-        logger.debug("starting sync for " + newNode);
-        try {
-          replicateMessage(PassiveSyncMessage.createStartSyncMessage(), Collections.singleton(newNode)).waitForCompleted();
-          for (ManagedEntity entity : entities) {
-            logger.debug("starting sync for entity " + newNode + "/" + entity.getID());
-            entity.sync(newNode);
-            logger.debug("ending sync for entity " + newNode + "/" + entity.getID());
+    passiveSyncPool.execute(() -> {
+      // start passive sync message
+      logger.debug("starting sync for " + newNode);
+      Iterable<ManagedEntity> e = snapshotter.snapshotEntityList(new Consumer<List<ManagedEntity>>() {
+        @Override
+        public void accept(List<ManagedEntity> sortedEntities) {
+          // We want to create the array of activity data.
+          List<SyncReplicationActivity.EntityCreationTuple> tuplesForCreation = new ArrayList<>();
+          for (ManagedEntity e : sortedEntities) {
+            SyncReplicationActivity.EntityCreationTuple data = e.startSync();
+            // null creation data means that the entity, while in the list of entities, is
+            // not to be synced because it has been destroyed or not yet fully created and
+            // initiated
+            if (data != null) {
+              tuplesForCreation.add(data);              
+            }
           }
-      //  passive sync done message.  causes passive to go into passive standby mode
-          logger.debug("ending sync " + newNode);
-          replicateMessage(PassiveSyncMessage.createEndSyncMessage(replicateEntityPersistor()), Collections.singleton(newNode)).waitForCompleted();
-        } catch (InterruptedException e) {
-          throw new AssertionError("error during passive sync", e);
-        }
+          replicateActivity(SyncReplicationActivity.
+              createStartSyncMessage(tuplesForCreation.
+                  toArray(new SyncReplicationActivity.EntityCreationTuple[tuplesForCreation.size()])), Collections.singleton(newNode)).waitForCompleted();
+        }}
+      );
+      for (ManagedEntity entity : e) {
+        logger.debug("starting sync for entity " + newNode + "/" + entity.getID());
+        entity.sync(newNode);
+        logger.debug("ending sync for entity " + newNode + "/" + entity.getID());
       }
+      //  passive sync done message.  causes passive to go into passive standby mode
+      logger.debug("ending sync " + newNode);
+      replicateActivity(SyncReplicationActivity.createEndSyncMessage(replicateEntityPersistor()), Collections.singleton(newNode)).waitForCompleted();
     });
   }
   
@@ -158,79 +194,93 @@ public class ActiveToPassiveReplication implements PassiveReplicationBroker, Gro
     return null;
   }
 
-  public void ackReceived(GroupMessage msg) {
-    ActivePassiveAckWaiter waiter = waiters.get(msg.inResponseTo());
-    if (null != waiter) {
-      waiter.didReceiveOnPassive(msg.messageFrom());
+  public void batchAckReceived(ReplicationMessageAck context) {
+    NodeID messageFrom = context.messageFrom();
+    for (ReplicationAckTuple tuple : context.getBatch()) {
+      if (ReplicationResultCode.RECEIVED == tuple.result) {
+        ActivePassiveAckWaiter waiter = waiters.get(tuple.respondTo);
+        if (null != waiter) {
+          waiter.didReceiveOnPassive(messageFrom);
+        }
+      } else {
+        // This is a normal completion.
+        boolean isNormalComplete = true;
+        internalAckCompleted(tuple.respondTo, messageFrom, tuple.result, isNormalComplete);
+      }
     }
-  }
-
-  public void ackCompleted(GroupMessage msg) {
-    // This is a normal completion.
-    boolean isNormalComplete = true;
-    internalAckCompleted(msg.inResponseTo(), msg.messageFrom(), isNormalComplete);
   }
 
   /**
    * This internal handling for completed is split out since it happens for both completed acks but also situations which
    * implies no ack is forthcoming (the passive disappearing, for example).
    */
-  private void internalAckCompleted(MessageID mid, NodeID passive, boolean isNormalComplete) {
-    ActivePassiveAckWaiter waiter = waiters.get(mid);
+  private void internalAckCompleted(SyncReplicationActivity.ActivityID activityID, NodeID passive, ReplicationResultCode payload, boolean isNormalComplete) {
+    ActivePassiveAckWaiter waiter = waiters.get(activityID);
     if (null != waiter) {
-      boolean shouldDiscardWaiter = waiter.didCompleteOnPassive(passive, isNormalComplete);
+      boolean shouldDiscardWaiter = waiter.didCompleteOnPassive(passive, isNormalComplete, payload);
       if (shouldDiscardWaiter) {
-        waiters.remove(mid);
+        waiters.remove(activityID);
       }
     }
   }
 
   @Override
   public Set<NodeID> passives() {
-    return passiveNodes;
+    return new HashSet<>(passiveNodes);
   }
 
   @Override
-  public ActivePassiveAckWaiter replicateMessage(ReplicationMessage msg, Set<NodeID> all) {
+  public ActivePassiveAckWaiter replicateActivity(SyncReplicationActivity activity, Set<NodeID> all) {
     Set<NodeID> copy = new HashSet<>(all); 
 // don't replicate to a passive that is no longer there
     copy.retainAll(passives());
-    ActivePassiveAckWaiter waiter = new ActivePassiveAckWaiter(copy);
+    ActivePassiveAckWaiter waiter = new ActivePassiveAckWaiter(copy, this);
     if (!copy.isEmpty()) {
-      waiters.put(msg.getMessageID(), waiter);
+      SyncReplicationActivity.ActivityID activityID = activity.getActivityID();
+      waiters.put(activityID, waiter);
+      // Note that we want to explicitly create the ReplicationEnvelope using a different helper if it is a local flush
+      //  command.
+      boolean isLocalFlush = (SyncReplicationActivity.ActivityType.FLUSH_LOCAL_PIPELINE == activity.getActivityType());
       for (NodeID node : copy) {
-        // This is a normal completion.
-        boolean isNormalComplete = true;
-        replicate.addSingleThreaded(msg.target(node, ()->internalAckCompleted(msg.getMessageID(), node, isNormalComplete)));
+        if (!isLocalFlush) {
+          // This isn't local-only so try to replicate.
+          this.replicationSender.replicateMessage(node, activity, sent->{
+            if (!sent) {
+              // We didn't send so just ack complete, internally.
+              boolean isNormalComplete = true;
+              internalAckCompleted(activityID, node, null, isNormalComplete);
+            }
+          });
+        }
+
       }
     }
     return waiter;
   }
 
-  public void removePassive(NodeID nodeID) {
+  private void removePassive(NodeID nodeID) {
+    passiveSyncPool.execute(()->{
+      while (!consistencyMgr.requestTransition(ServerMode.ACTIVE, nodeID, ConsistencyManager.Transition.REMOVE_PASSIVE)) {
+        try {
+          TimeUnit.SECONDS.sleep(2);
+        } catch (InterruptedException ie) {
+          logger.info("interrupted while waiting for permission to remove node");
+        }
+      }
 // first remove it from the list of passive nodes so that anything sending new messages 
 // will have to remove it from the list of nodes to send to
-    passiveNodes.remove(nodeID);
+      passiveNodes.remove(nodeID);
 //  acknowledge all the messages for this node because it is gone, this may result in 
 //  a double ack locally but that is ok.  acknowledge is loose and can tolerate it. 
-    if (activated) {
-      // This is a an unexpected kind of completion.
-      boolean isNormalComplete = false;
-      waiters.forEach((key, value)->internalAckCompleted(key, nodeID, isNormalComplete));
-//  this is a flush message (null).  Tell the sink there will be no more 
-//  messages targeted at this nodeid
-      Semaphore block = new Semaphore(0);
-      replicate.addSingleThreaded(new ReplicationEnvelope(nodeID, null, ()->block.release()));
-      waitOnSemaphore(block);
-    }
+  //  remove the passive node from the sender first.  nothing else is going out
+      this.replicationSender.removePassive(nodeID);
+      removeWaiters(nodeID);
+    });
   }
   
-  private void waitOnSemaphore(Semaphore block) {
-    try {
-      block.acquire();
-    } catch (InterruptedException e) {
-      throw new AssertionError(e);
-    }
+  private void removeWaiters(NodeID nodeID) {      // This is a an unexpected kind of completion.
+    boolean isNormalComplete = false;
+    waiters.forEach((key, value)->internalAckCompleted(key, nodeID, null,isNormalComplete));
   }
 
   @Override
@@ -243,10 +293,13 @@ public class ActiveToPassiveReplication implements PassiveReplicationBroker, Gro
 
   @Override
   public void nodeLeft(NodeID nodeID) {
-    removePassive(nodeID);
+    if (activated) {
+      removePassive(nodeID);
+    }
 //  standby nodes for tracking only.  no practical use
     synchronized(standByNodes) {
       standByNodes.remove(nodeID);
+      standByNodes.notifyAll();
     }
   }
 }

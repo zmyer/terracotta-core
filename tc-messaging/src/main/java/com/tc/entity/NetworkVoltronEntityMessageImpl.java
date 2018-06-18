@@ -27,12 +27,15 @@ import com.tc.net.protocol.tcm.MessageMonitor;
 import com.tc.net.protocol.tcm.TCMessageHeader;
 import com.tc.net.protocol.tcm.TCMessageType;
 import com.tc.object.EntityDescriptor;
+import com.tc.object.EntityID;
 import com.tc.object.msg.DSOMessageBase;
 import com.tc.object.session.SessionID;
 import com.tc.object.tx.TransactionID;
 import com.tc.util.Assert;
 
 import java.io.IOException;
+import java.util.EnumSet;
+import java.util.Set;
 
 import org.terracotta.entity.EntityMessage;
 import org.terracotta.entity.EntityResponse;
@@ -43,6 +46,7 @@ import org.terracotta.entity.MessageCodecException;
 public class NetworkVoltronEntityMessageImpl extends DSOMessageBase implements NetworkVoltronEntityMessage {
   private ClientID clientID;
   private TransactionID transactionID;
+  private EntityID eid;  // only used locally for exception handling on invokes DO NOT PUT OVER THE NETWORK
   private EntityDescriptor entityDescriptor;
   private Type type;
   private boolean requiresReplication;
@@ -50,6 +54,7 @@ public class NetworkVoltronEntityMessageImpl extends DSOMessageBase implements N
   private TransactionID oldestTransactionPending;
   private MessageCodecSupplier supplier;
   private EntityMessage message;
+  private Set<VoltronEntityMessage.Acks> requestedAcks;
 
   @Override
   public ClientID getSource() {
@@ -61,7 +66,12 @@ public class NetworkVoltronEntityMessageImpl extends DSOMessageBase implements N
     Assert.assertNotNull(this.transactionID);
     return this.transactionID;
   }
-  
+
+  @Override
+  public EntityID getEntityID() {
+    return eid;  // only used locally for exception handling on invokes
+  }
+
   @Override
   public EntityDescriptor getEntityDescriptor() {
     Assert.assertNotNull(this.entityDescriptor);
@@ -71,6 +81,11 @@ public class NetworkVoltronEntityMessageImpl extends DSOMessageBase implements N
   @Override
   public boolean doesRequireReplication() {
     return this.requiresReplication;
+  }
+  
+  @Override
+  public boolean doesRequestReceived() {
+    return this.requestedAcks.contains(Acks.RECEIVED);
   }
   
   @Override
@@ -91,23 +106,38 @@ public class NetworkVoltronEntityMessageImpl extends DSOMessageBase implements N
   }
 
   @Override
-  public void setContents(ClientID clientID, TransactionID transactionID, EntityDescriptor entityDescriptor, Type type, boolean requiresReplication, byte[] extendedData, TransactionID oldestTransactionPending) {
+  public Set<Acks> getRequestedAcks() {
+    return requestedAcks;
+  }
+  
+  @Override
+  public void setContents(ClientID clientID, TransactionID transactionID, EntityID eid, EntityDescriptor entityDescriptor, 
+          Type type, boolean requiresReplication, byte[] extendedData, TransactionID oldestTransactionPending, Set<VoltronEntityMessage.Acks> acks) {
     // Make sure that this wasn't called twice.
     Assert.assertNull(this.type);
     Assert.assertNotNull(clientID);
     Assert.assertNotNull(transactionID);
+    Assert.assertNotNull(eid);
     Assert.assertNotNull(entityDescriptor);
     Assert.assertNotNull(type);
     Assert.assertNotNull(extendedData);
     Assert.assertNotNull(oldestTransactionPending);
+    Assert.assertNotNull(acks);
+    if (type == Type.INVOKE_ACTION) {
+      Assert.assertTrue(entityDescriptor.isIndexed());
+    } else {
+      Assert.assertFalse(entityDescriptor.isIndexed());
+    }
 
     this.clientID = clientID;
     this.transactionID = transactionID;
+    this.eid = eid;
     this.entityDescriptor = entityDescriptor;
     this.type = type;
     this.requiresReplication = requiresReplication;
     this.extendedData = extendedData;
     this.oldestTransactionPending = oldestTransactionPending;
+    this.requestedAcks = acks;
   }
 
   @Override
@@ -143,6 +173,11 @@ public class NetworkVoltronEntityMessageImpl extends DSOMessageBase implements N
     outputStream.writeBoolean(requiresReplication);
     
     outputStream.writeLong(this.oldestTransactionPending.toLong());
+    
+    outputStream.writeByte(requestedAcks.size());
+    for (VoltronEntityMessage.Acks ack : this.requestedAcks) {
+      outputStream.writeByte(ack.ordinal());
+    }
   }
   
   @Override
@@ -160,9 +195,25 @@ public class NetworkVoltronEntityMessageImpl extends DSOMessageBase implements N
     this.requiresReplication = getBooleanValue();
     this.oldestTransactionPending = new TransactionID(getLongValue());
     
+    int ac = getByteValue();
+    if (ac == 0) {
+      this.requestedAcks = EnumSet.noneOf(Acks.class);
+    } else {
+      Acks first = Acks.values()[getByteValue()];
+      if (ac > 1) {
+        Acks[] rest = new Acks[ac - 1];
+        for (int x=0;x < ac - 1;x++) {
+          rest[x] = Acks.values()[getByteValue()];
+        }
+        this.requestedAcks = EnumSet.of(first, rest);
+      } else {
+        this.requestedAcks = EnumSet.of(first);
+      }
+    }
+
     try {
       if (this.type == Type.INVOKE_ACTION) {
-        MessageCodec<EntityMessage, EntityResponse> codec = supplier.getMessageCodec(this.entityDescriptor.getEntityID());
+        MessageCodec<? extends EntityMessage, ? extends EntityResponse> codec = supplier.getMessageCodec(this.entityDescriptor);
         this.message = codec.decodeMessage(extendedData);
       }
     } catch (MessageCodecException exception) {

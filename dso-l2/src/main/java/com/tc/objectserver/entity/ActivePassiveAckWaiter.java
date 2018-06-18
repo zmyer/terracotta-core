@@ -18,10 +18,15 @@
  */
 package com.tc.objectserver.entity;
 
+import com.tc.exception.TCServerRestartException;
+import com.tc.l2.msg.ReplicationResultCode;
 import com.tc.net.NodeID;
 import com.tc.util.Assert;
+import java.util.Collections;
+import java.util.HashMap;
 
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 
 
@@ -30,24 +35,57 @@ import java.util.Set;
  * COMPLETED acknowledgement for a specific message.
  */
 public class ActivePassiveAckWaiter {
+  private final Set<NodeID> start;
   private final Set<NodeID> receivedPending;
+  private final Set<NodeID> receivedByComplete;
   private final Set<NodeID> completedPending;
+  private final Map<NodeID, ReplicationResultCode> results;
+  private final PassiveReplicationBroker parent;
 
-  public ActivePassiveAckWaiter(Set<NodeID> allPassiveNodes) {
-    this.receivedPending =  new HashSet<NodeID>(allPassiveNodes);
-    this.completedPending =  new HashSet<NodeID>(allPassiveNodes);
+  public ActivePassiveAckWaiter(Set<NodeID> allPassiveNodes, PassiveReplicationBroker parent) {
+    this.start =  Collections.unmodifiableSet(allPassiveNodes);
+    this.receivedPending =  new HashSet<>(allPassiveNodes);
+    this.completedPending =  new HashSet<>(allPassiveNodes);
+    this.receivedByComplete =  new HashSet<>();
+    this.results = new HashMap<>();
+    this.parent = parent;
   }
 
-  public synchronized void waitForReceived() throws InterruptedException {
-    while (!this.receivedPending.isEmpty()) {
-      wait();
+  public synchronized void waitForReceived() {
+    try {
+      while (!this.receivedPending.isEmpty()) {
+        wait();
+      }
+    } catch (InterruptedException ie) {
+      throw new RuntimeException(ie);
     }
   }
 
-  public synchronized void waitForCompleted() throws InterruptedException {
-    while (!this.completedPending.isEmpty()) {
-      wait();
+  public synchronized void waitForCompleted() {
+    try {
+      while (!this.completedPending.isEmpty()) {
+        wait();
+     }
+    } catch (InterruptedException ie) {
+      throw new RuntimeException(ie);
     }
+  }
+  
+  public boolean verifyLifecycleResult(boolean success) {
+    if(results.entrySet().stream().anyMatch(e->e.getValue() == (success ? ReplicationResultCode.FAIL : ReplicationResultCode.SUCCESS))) {
+      boolean zapped = false;
+      for (Map.Entry<NodeID, ReplicationResultCode> r : results.entrySet()) {
+        if (r.getValue() == ReplicationResultCode.FAIL) {
+          parent.zapAndWait(r.getKey());
+          zapped = true;
+        }
+      }
+      if (!success) {
+        throw new TCServerRestartException("inconsistent lifecycle");
+      }
+      return zapped;
+    }
+    return false;
   }
 
   public synchronized boolean isCompleted() {
@@ -57,7 +95,9 @@ public class ActivePassiveAckWaiter {
   public synchronized void didReceiveOnPassive(NodeID onePassive) {
     boolean didContain = this.receivedPending.remove(onePassive);
     // We must have contained this passive in order to receive.
-    Assert.assertTrue(didContain);
+    if (!didContain) {
+      Assert.assertTrue(onePassive + " " + toString(), this.receivedByComplete.contains(onePassive));
+    }    
     // Wake everyone up if this changed something.
     if (this.receivedPending.isEmpty()) {
       notifyAll();
@@ -69,11 +109,15 @@ public class ActivePassiveAckWaiter {
    * 
    * @param onePassive The passive which has completed the replicated message
    * @param isNormalComplete True if this was a normal complete ack, false if we are completing because the node disappeared
+   * @param payload
    * @return True if this was the last outstanding completion required and the waiter is now done.
    */
-  public synchronized boolean didCompleteOnPassive(NodeID onePassive, boolean isNormalComplete) {
+  public synchronized boolean didCompleteOnPassive(NodeID onePassive, boolean isNormalComplete, ReplicationResultCode payload) {
     // Note that we will try to remove from the received set, but usually it will already have been removed.
     boolean didContainInReceived = this.receivedPending.remove(onePassive);
+    if (didContainInReceived) {
+      this.receivedByComplete.add(onePassive);
+    }
     // We know that it must still be in the completed set, though.
     boolean didContainInCompleted = this.completedPending.remove(onePassive);
     // We must have contained this passive in order to complete.
@@ -81,6 +125,7 @@ public class ActivePassiveAckWaiter {
       // In the unexpected case, we are just making sure this node is removed from all waiters, even though it might have
       // already completed on some of them.
       Assert.assertTrue(didContainInCompleted);
+      this.results.put(onePassive, payload);
     }
     boolean isDoneWaiting = this.completedPending.isEmpty();
     // Wake everyone up if this changed something.
@@ -88,5 +133,10 @@ public class ActivePassiveAckWaiter {
       notifyAll();
     }
     return isDoneWaiting;
+  }
+
+  @Override
+  public String toString() {
+    return "ActivePassiveAckWaiter{" + "start=" + start + ", receivedPending=" + receivedPending + ", receivedByComplete=" + receivedByComplete + ", completedPending=" + completedPending + ", results=" + results + '}';
   }
 }

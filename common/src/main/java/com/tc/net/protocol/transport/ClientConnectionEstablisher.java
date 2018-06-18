@@ -18,20 +18,17 @@
  */
 package com.tc.net.protocol.transport;
 
-import com.tc.logging.CustomerLogging;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.tc.logging.LossyTCLogger;
 import com.tc.logging.LossyTCLogger.LossyTCLoggerType;
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
 import com.tc.net.CommStackMismatchException;
 import com.tc.net.MaxConnectionsExceededException;
 import com.tc.net.ReconnectionRejectedException;
 import com.tc.net.TCSocketAddress;
-import com.tc.net.core.ConnectionAddressIterator;
-import com.tc.net.core.ConnectionAddressProvider;
 import com.tc.net.core.ConnectionInfo;
-import com.tc.net.core.TCConnection;
-import com.tc.net.core.TCConnectionManager;
+import com.tc.net.protocol.NetworkStackID;
 import com.tc.properties.TCPropertiesConsts;
 import com.tc.properties.TCPropertiesImpl;
 import com.tc.util.Assert;
@@ -41,6 +38,10 @@ import com.tc.util.Util;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.Queue;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -50,18 +51,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class ClientConnectionEstablisher {
 
-  private static final TCLogger             LOGGER                = TCLogging
-                                                                      .getLogger(ClientConnectionEstablisher.class);
+  private static final Logger LOGGER = LoggerFactory.getLogger(ClientConnectionEstablisher.class);
 
   private static final long                 CONNECT_RETRY_INTERVAL;
   private static final long                 MIN_RETRY_INTERVAL    = 10;
   public static final String                RECONNECT_THREAD_NAME = "ConnectionEstablisher";
 
-  private final String                      desc;
-  private final int                         maxReconnectTries;
-  private final int                         timeout;
-  private final ConnectionAddressProvider   connAddressProvider;
-  private final TCConnectionManager         connManager;
+  private final LinkedHashSet<ConnectionInfo>   connAddressProvider;
   private final AtomicBoolean               asyncReconnecting     = new AtomicBoolean(false);
   private final AtomicBoolean               allowReconnects       = new AtomicBoolean(true);
   private volatile AsyncReconnect           asyncReconnect;
@@ -69,34 +65,20 @@ public class ClientConnectionEstablisher {
   private final ReconnectionRejectedHandler reconnectionRejectedHandler;
 
   static {
-    TCLogger logger = TCLogging.getLogger(ClientConnectionEstablisher.class);
+    Logger logger = LoggerFactory.getLogger(ClientConnectionEstablisher.class);
     long value = TCPropertiesImpl.getProperties().getLong(TCPropertiesConsts.L1_SOCKET_RECONNECT_WAIT_INTERVAL);
     if (value < MIN_RETRY_INTERVAL) {
-      logger.warn("Forcing reconnect wait interval to " + MIN_RETRY_INTERVAL + " (configured value was " + value + ")");
+      logger.info("Forcing reconnect wait interval to " + MIN_RETRY_INTERVAL + " (configured value was " + value + ")");
       value = MIN_RETRY_INTERVAL;
     }
 
     CONNECT_RETRY_INTERVAL = value;
   }
 
-  public ClientConnectionEstablisher(TCConnectionManager connManager, ConnectionAddressProvider connAddressProvider,
-                                     int maxReconnectTries, int timeout,
-                                     ReconnectionRejectedHandler reconnectionRejectedHandler) {
-    this.connManager = connManager;
-    this.connAddressProvider = connAddressProvider;
-    this.maxReconnectTries = maxReconnectTries;
-    this.timeout = timeout;
+  public ClientConnectionEstablisher(ReconnectionRejectedHandler reconnectionRejectedHandler) {
+    this.connAddressProvider = new LinkedHashSet<ConnectionInfo>();
     this.reconnectionRejectedHandler = reconnectionRejectedHandler;
     this.asyncReconnect = new AsyncReconnect(this);
-
-    if (maxReconnectTries == 0) {
-      this.desc = "none";
-    } else if (maxReconnectTries < 0) {
-      this.desc = "unlimited";
-    } else {
-      this.desc = "" + maxReconnectTries;
-    }
-
   }
 
   public void reset() {
@@ -137,60 +119,63 @@ public class ClientConnectionEstablisher {
    * @throws CommStackMismatchException
    * @throws MaxConnectionsExceededException
    */
-  public void open(ClientMessageTransport cmt) throws TCTimeoutException, IOException, MaxConnectionsExceededException,
+  public NetworkStackID open(Collection<ConnectionInfo> info, ClientMessageTransport cmt, ClientConnectionErrorListener reporter) throws TCTimeoutException, IOException, MaxConnectionsExceededException,
       CommStackMismatchException {
+    Assert.assertNotNull(cmt);
+    Assert.assertNotNull(reporter);
+    Assert.assertNotNull(info);
     synchronized (this.asyncReconnecting) {
+      if (info != null) {
+        connAddressProvider.addAll(info);
+      }
       Assert.eval("Can't call open() while asynch reconnect occurring", !this.asyncReconnecting.get());
       this.allowReconnects.set(true);
-      connectTryAllOnce(cmt);
+      return connectTryAllOnce(cmt, reporter);
     }
   }
 
-  void connectTryAllOnce(ClientMessageTransport cmt) throws TCTimeoutException, IOException,
+  NetworkStackID connectTryAllOnce(ClientMessageTransport cmt, ClientConnectionErrorListener reporter) throws TCTimeoutException, IOException,
       MaxConnectionsExceededException, CommStackMismatchException {
-    final ConnectionAddressIterator addresses = this.connAddressProvider.getIterator();
-    TCConnection rv = null;
-    while (addresses.hasNext()) {
-      final ConnectionInfo connInfo = addresses.next();
+    final Iterator<ConnectionInfo> addresses = new ArrayList<ConnectionInfo>(this.connAddressProvider).iterator();
+    Assert.assertFalse(cmt.isConnected());
+    ConnectionInfo info = null;
+    
+    while (info != null || addresses.hasNext()) {
+      if (info == null) {
+        info = addresses.next();
+      }
       try {
-        final TCSocketAddress csa = new TCSocketAddress(connInfo);
-        rv = connect(csa, cmt);
-        cmt.openConnection(rv);
-        break;
+        return cmt.open(info);
+      } catch (TransportRedirect redirect) {
+        ConnectionInfo add = new ConnectionInfo(redirect.getHostname(), redirect.getPort());
+        reporter.onError(info, redirect);
+        info = null;
+        if (this.connAddressProvider.add(add)) {
+          info = add;
+        }
+      } catch (NoActiveException noactive) {
+        reporter.onError(info, noactive);
+        info = null;
+        LOGGER.debug("Connection attempt failed: ", noactive);
+        // if there is no active, throw an IOException and let upper layers of 
+        // the network stack handle the issue
+        if (!addresses.hasNext()) { throw new IOException(noactive); }
       } catch (TCTimeoutException e) {
+        reporter.onError(info, e);
+        info = null;
         if (!addresses.hasNext()) { throw e; }
       } catch (IOException e) {
+        reporter.onError(info, e);
+        info = null;
         if (!addresses.hasNext()) { throw e; }
       }
     }
-  }
-
-  /**
-   * Tries to make a connection. This is a blocking call.
-   * 
-   * @return
-   * @throws TCTimeoutException
-   * @throws IOException
-   * @throws MaxConnectionsExceededException
-   */
-  TCConnection connect(TCSocketAddress sa, ClientMessageTransport cmt) throws TCTimeoutException, IOException {
-
-    TCConnection connection = this.connManager.createConnection(cmt.getProtocolAdapter());
-    cmt.fireTransportConnectAttemptEvent();
-    try {
-      connection.connect(sa, this.timeout);
-    } catch (IOException e) {
-      connection.close(100);
-      throw e;
-    } catch (TCTimeoutException e) {
-      throw e;
-    }
-    return connection;
+    throw new IOException("active not available");
   }
 
   @Override
   public String toString() {
-    return "ClientConnectionEstablisher[" + this.connAddressProvider + ", timeout=" + this.timeout + "]";
+    return "ClientConnectionEstablisher[" + this.connAddressProvider + "]";
   }
 
   void reconnect(ClientMessageTransport cmt) throws MaxConnectionsExceededException {
@@ -200,17 +185,18 @@ public class ClientConnectionEstablisher {
                                                                    LossyTCLoggerType.TIME_BASED, true);
 
       boolean connected = cmt.isConnected();
-      if (connected) {
-        cmt.getLogger().warn("Got reconnect request for ClientMessageTransport that is connected.  skipping");
+      if (!cmt.getConnectionId().getProductId().isReconnectEnabled() && !isReconnectBetweenL2s()) {
+        cmt.getLogger().info("Got reconnect request for ClientMessageTransport that does not support it.  skipping");
         return;
       }
 
       this.asyncReconnecting.set(true);
       boolean reconnectionRejected = false;
-      for (int i = 0; ((this.maxReconnectTries < 0) || (i < this.maxReconnectTries)) && isReconnectBetweenL2s()
-                      && !connected; i++) {
-        ConnectionAddressIterator addresses = this.connAddressProvider.getIterator();
-        while (addresses.hasNext() && !connected && isReconnectBetweenL2s()) {
+      ConnectionInfo target = null;
+
+      for (int i = 0; tryToConnect(connected); i++) {
+        Iterator<ConnectionInfo> addresses = new ArrayList<ConnectionInfo>(this.connAddressProvider).iterator();
+        while ((target != null || addresses.hasNext()) && tryToConnect(connected)) {
 
           if (reconnectionRejected) {
             if (reconnectionRejectedHandler.isRetryOnReconnectionRejected()) {
@@ -221,8 +207,9 @@ public class ClientConnectionEstablisher {
             }
           }
 
-          TCConnection connection = null;
-          final ConnectionInfo connInfo = addresses.next();
+          if (target == null) {
+            target = addresses.next();
+          }
 
           // DEV-1945
           if (i == 0) {
@@ -234,37 +221,57 @@ public class ClientConnectionEstablisher {
             }
             String connectingToHost = "";
             try {
-              connectingToHost = getHostByName(connInfo);
+              connectingToHost = getHostByName(target);
             } catch (UnknownHostException e) {
-              handleConnectException(e, true, connectionErrorLossyLogger, connection);
+              handleConnectException(e, true, connectionErrorLossyLogger);
               // keep trying reconnects, for maxReconnectTries
+              target = null;
               continue;
             }
-            int connectingToHostPort = connInfo.getPort();
+            int connectingToHostPort = target.getPort();
             if ((addresses.hasNext()) && (previousConnectHost.equals(connectingToHost))
                 && (previousConnectHostPort == connectingToHostPort)) {
+              target = null;
               continue;
             }
           }
           try {
-            if (i % 20 == 0) {
-              cmt.getLogger().warn("Reconnect attempt " + i + " of " + this.desc + " reconnect tries to " + connInfo
-                                       + ", timeout=" + this.timeout);
+            if (i % 20 == 0 && i > 0) {
+              cmt.getLogger().info("Reconnect attempt " + i + " to " + target);
             }
-            connection = connect(new TCSocketAddress(connInfo), cmt);
-            cmt.reconnect(connection);
-            connected = true;
+            cmt.reopen(target);
+            connected = cmt.getConnectionId().isValid();        
+          } catch (TransportRedirect redirect) {
+            ConnectionInfo add = new ConnectionInfo(redirect.getHostname(), redirect.getPort());
+            target = null;
+            if (this.connAddressProvider.add(add)) {
+              target = add;
+            }
+          } catch (NoActiveException noactive) {
+            target = null;
+            handleConnectException(new IOException(noactive), false, connectionErrorLossyLogger);
           } catch (MaxConnectionsExceededException e) {
+            target = null;
+            reset();
             throw e;
           } catch (ReconnectionRejectedException e) {
+            target = null;
+            reset();
             reconnectionRejected = true;
-            handleConnectException(e, false, connectionErrorLossyLogger, connection);
+            handleConnectException(e, false, connectionErrorLossyLogger);
+          } catch (CommStackMismatchException e) {
+            target = null;
+            reset();
+            handleConnectException(e, false, connectionErrorLossyLogger);
           } catch (TCTimeoutException e) {
-            handleConnectException(e, true, connectionErrorLossyLogger, connection);
+            target = null;
+            handleConnectException(e, true, connectionErrorLossyLogger);
           } catch (IOException e) {
-            handleConnectException(e, false, connectionErrorLossyLogger, connection);
+            target = null;
+            handleConnectException(e, false, connectionErrorLossyLogger);
           } catch (Exception e) {
-            handleConnectException(e, true, connectionErrorLossyLogger, connection);
+            target = null;
+            handleConnectException(e, true, connectionErrorLossyLogger);
           }
         }
       }
@@ -279,7 +286,11 @@ public class ClientConnectionEstablisher {
 
   // TRUE for L2, for L1 only if not stopped
   boolean isReconnectBetweenL2s() {
-    return reconnectionRejectedHandler.isRetryOnReconnectionRejected() || !asyncReconnect.isStopped();
+    return reconnectionRejectedHandler.isRetryOnReconnectionRejected();
+  }
+  
+  private boolean tryToConnect(boolean connected) {
+    return !connected && !asyncReconnect.isStopped();
   }
 
   void restoreConnection(ClientMessageTransport cmt, TCSocketAddress sa, long timeoutMillis,
@@ -287,14 +298,14 @@ public class ClientConnectionEstablisher {
     final long deadline = System.currentTimeMillis() + timeoutMillis;
     boolean connected = cmt.isConnected();
     if (connected) {
-      cmt.getLogger().warn("Got restoreConnection request for ClientMessageTransport that is connected.  skipping");
+      cmt.getLogger().info("Got restoreConnection request for ClientMessageTransport that is connected.  skipping");
       return;
     }
 
     this.asyncReconnecting.set(true);
     try {
       boolean reconnectionRejected = false;
-      while (!connected && isReconnectBetweenL2s()) {
+      while (tryToConnect(connected)) {
 
         if (reconnectionRejected) {
           if (reconnectionRejectedHandler.isRetryOnReconnectionRejected()) {
@@ -304,24 +315,31 @@ public class ClientConnectionEstablisher {
             return;
           }
         }
-        TCConnection connection = null;
         try {
-          connection = connect(sa, cmt);
-          cmt.reconnect(connection);
+          cmt.reconnect(sa);
           connected = true;
+        } catch (TransportRedirect redirect) {
+          Assert.fail();
+        } catch (NoActiveException noactive) {
+          Assert.fail();
         } catch (MaxConnectionsExceededException e) {
           callback.restoreConnectionFailed(cmt);
+          reset();
           // DEV-2781
           throw e;
         } catch (TCTimeoutException e) {
-          handleConnectException(e, true, cmt.getLogger(), connection);
+          handleConnectException(e, true, cmt.getLogger());
         } catch (ReconnectionRejectedException e) {
           reconnectionRejected = true;
-          handleConnectException(e, false, cmt.getLogger(), connection);
+          reset();
+          handleConnectException(e, false, cmt.getLogger());
+        } catch (CommStackMismatchException e) {
+          reset();
+          handleConnectException(e, false, cmt.getLogger());
         } catch (IOException e) {
-          handleConnectException(e, false, cmt.getLogger(), connection);
+          handleConnectException(e, false, cmt.getLogger());
         } catch (Exception e) {
-          handleConnectException(e, true, cmt.getLogger(), connection);
+          handleConnectException(e, true, cmt.getLogger());
         }
         if (connected || System.currentTimeMillis() > deadline) {
           break;
@@ -335,15 +353,9 @@ public class ClientConnectionEstablisher {
     }
   }
 
-  private void handleConnectException(Exception e, boolean logFullException, TCLogger logger, TCConnection connection) {
-    if (connection != null) {
-      connection.close(100);
-    }
-
+  private void handleConnectException(Exception e, boolean logFullException, Logger logger) {
     if (logger.isDebugEnabled() || logFullException) {
       logger.error("Connect Exception", e);
-    } else {
-      logger.warn(e.getMessage());
     }
 
     if (CONNECT_RETRY_INTERVAL > 0) {
@@ -356,7 +368,9 @@ public class ClientConnectionEstablisher {
   }
 
   public void asyncReconnect(ClientMessageTransport cmt) {
-    putConnectionRequest(ConnectionRequest.newReconnectRequest(cmt));
+    if (cmt.getConnectionId().isValid()) {
+      putConnectionRequest(ConnectionRequest.newReconnectRequest(cmt));
+    }
   }
 
   public void asyncRestoreConnection(ClientMessageTransport cmt, TCSocketAddress sa,
@@ -392,7 +406,7 @@ public class ClientConnectionEstablisher {
   }
 
   static class AsyncReconnect implements Runnable {
-    private static final TCLogger             logger             = TCLogging.getLogger(AsyncReconnect.class);
+    private static final Logger logger = LoggerFactory.getLogger(AsyncReconnect.class);
     private final ClientConnectionEstablisher cce;
     private boolean                  stopped            = false;
     private final Queue<ConnectionRequest>    connectionRequests = new LinkedList<ConnectionRequest>();
@@ -421,7 +435,7 @@ public class ClientConnectionEstablisher {
           oldThread.join();
         }
       } catch (InterruptedException e) {
-        LOGGER.warn("Got interrupted while waiting for connectionEstablisherThread to complete");
+        LOGGER.info("Got interrupted while waiting for connectionEstablisherThread to complete");
         isInterrupted = true;
       } finally {
         Util.selfInterruptIfNeeded(isInterrupted);
@@ -434,14 +448,14 @@ public class ClientConnectionEstablisher {
           throw new AssertionError("not stopped");
         }
         connectionRequests.clear();
-        LOGGER.info("waiting for connection establisher to finish " + connectionEstablisherThread);
+        LOGGER.debug("waiting for connection establisher to finish " + connectionEstablisherThread);
         this.notifyAll();
       }
       waitForThread(connectionEstablisherThread, mayInterruptIfRunning);
     }
 
     public synchronized void stop() {
-      logger.info("Connection establisher stopping " + System.identityHashCode(this));
+      logger.debug("Connection establisher stopping " + System.identityHashCode(this));
       stopped = true;
       this.notifyAll();
     }
@@ -480,7 +494,7 @@ public class ClientConnectionEstablisher {
     private void startThreadIfNecessary() {
   //  Should be synchronized by caller
       if (connectionEstablisherThread == null && !disableThreadSpawn) {
-        Thread thread = new Thread(this, RECONNECT_THREAD_NAME + "-" + cce.connAddressProvider.getGroupId() + "-" + System.identityHashCode(this));
+        Thread thread = new Thread(this, RECONNECT_THREAD_NAME + "-" + this.cce.connAddressProvider.toString() + "-" + System.identityHashCode(this));
         thread.setDaemon(true);
         thread.start();
         connectionEstablisherThread = thread;
@@ -489,7 +503,7 @@ public class ClientConnectionEstablisher {
 
     @Override
     public void run() {
-      logger.info("Connection establisher starting. " + System.identityHashCode(this));
+      logger.debug("Connection establisher starting. " + System.identityHashCode(this));
       while (!isStopped()) {
         ConnectionRequest request = waitUntilRequestAvailableOrStopped();
         if (request != null) {
@@ -510,8 +524,7 @@ public class ClientConnectionEstablisher {
             }
           } catch (MaxConnectionsExceededException e) {
             String connInfo = ((cmt == null) ? "" : (cmt.getLocalAddress() + "->" + cmt.getRemoteAddress() + " "));
-            CustomerLogging.getConsoleLogger().fatal(connInfo + e.getMessage());
-            if (cmt != null) cmt.getLogger().warn("No longer trying to reconnect.");
+            cmt.getLogger().error(connInfo + e.getMessage());
             return;
           } catch (Throwable t) {
             if (cmt != null) cmt.getLogger().warn("Reconnect failed !", t);

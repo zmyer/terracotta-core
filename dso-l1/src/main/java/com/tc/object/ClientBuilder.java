@@ -18,11 +18,11 @@
  */
 package com.tc.object;
 
+import com.tc.net.protocol.transport.ClientConnectionErrorListener;
+import org.slf4j.Logger;
+
 import com.tc.async.api.StageManager;
-import com.tc.util.ProductID;
-import com.tc.logging.TCLogger;
 import com.tc.management.TCClient;
-import com.tc.net.core.security.TCSecurityManager;
 import com.tc.net.protocol.NetworkStackHarnessFactory;
 import com.tc.net.protocol.tcm.ClientMessageChannel;
 import com.tc.net.protocol.tcm.CommunicationsManager;
@@ -33,34 +33,29 @@ import com.tc.net.protocol.tcm.TCMessageType;
 import com.tc.net.protocol.transport.ConnectionPolicy;
 import com.tc.net.protocol.transport.HealthCheckerConfig;
 import com.tc.net.protocol.transport.ReconnectionRejectedHandler;
-import com.tc.object.config.PreparedComponentsFromL2Connection;
 import com.tc.object.handshakemanager.ClientHandshakeManager;
 import com.tc.object.msg.ClientHandshakeMessageFactory;
 import com.tc.object.session.SessionManager;
 import com.tc.object.session.SessionProvider;
-import com.tc.runtime.logging.LongGCLogger;
-import com.tcclient.cluster.ClusterInternalEventsGun;
+import com.tc.cluster.ClusterInternalEventsGun;
 
 import java.util.Map;
 
 
 public interface ClientBuilder {
   ClientMessageChannel createClientMessageChannel(CommunicationsManager commMgr,
-                                                     PreparedComponentsFromL2Connection connComp,
-                                                     SessionProvider sessionProvider, int maxReconnectTries,
+                                                     SessionProvider sessionProvider,
                                                      int socketConnectTimeout, TCClient client);
 
   CommunicationsManager createCommunicationsManager(MessageMonitor monitor,
                                                     TCMessageRouter messageRouter,
                                                     NetworkStackHarnessFactory stackHarnessFactory,
                                                     ConnectionPolicy connectionPolicy,
-                                                    int workerCommThreads,
                                                     HealthCheckerConfig hcConfig,
                                                     Map<TCMessageType, Class<? extends TCMessage>> messageTypeClassMapping,
-                                                    ReconnectionRejectedHandler reconnectionRejectedBehaviour,
-                                                    TCSecurityManager securityManager, ProductID productId);
+                                                    ReconnectionRejectedHandler reconnectionRejectedBehaviour);
 
-  ClientHandshakeManager createClientHandshakeManager(TCLogger logger,
+  ClientHandshakeManager createClientHandshakeManager(Logger logger,
                                                       ClientHandshakeMessageFactory chmf,
                                                       SessionManager sessionManager,
                                                       ClusterInternalEventsGun clusterEventsGun,
@@ -69,8 +64,8 @@ public interface ClientBuilder {
                                                       String clientVersion,
                                                       ClientEntityManager entity);
 
-  LongGCLogger createLongGCLogger(long gcTimeOut);
-
   ClientEntityManager createClientEntityManager(ClientMessageChannel channel, StageManager stages);
+
+  void setClientConnectionErrorListener(ClientConnectionErrorListener listener);
 
 }

@@ -18,13 +18,14 @@
  */
 package com.tc.object;
 
+import org.slf4j.Logger;
+import org.terracotta.connection.ConnectionPropertyNames;
+
 import com.tc.async.api.StageManager;
-import com.tc.util.ProductID;
-import com.tc.logging.TCLogger;
+import com.tc.cluster.ClusterInternalEventsGun;
 import com.tc.management.TCClient;
-import com.tc.net.core.ConnectionAddressProvider;
-import com.tc.net.core.ConnectionInfo;
-import com.tc.net.core.security.TCSecurityManager;
+import com.tc.net.core.BufferManagerFactory;
+import com.tc.net.core.ClearTextBufferManagerFactory;
 import com.tc.net.protocol.NetworkStackHarnessFactory;
 import com.tc.net.protocol.tcm.ClientMessageChannel;
 import com.tc.net.protocol.tcm.CommunicationsManager;
@@ -33,55 +34,56 @@ import com.tc.net.protocol.tcm.MessageMonitor;
 import com.tc.net.protocol.tcm.TCMessage;
 import com.tc.net.protocol.tcm.TCMessageRouter;
 import com.tc.net.protocol.tcm.TCMessageType;
+import com.tc.net.protocol.transport.ClientConnectionErrorListener;
 import com.tc.net.protocol.transport.ConnectionPolicy;
 import com.tc.net.protocol.transport.HealthCheckerConfig;
 import com.tc.net.protocol.transport.ReconnectionRejectedHandler;
 import com.tc.net.protocol.transport.TransportHandshakeErrorHandlerForL1;
-import com.tc.object.config.ConnectionInfoConfig;
-import com.tc.object.config.PreparedComponentsFromL2Connection;
 import com.tc.object.handshakemanager.ClientHandshakeManager;
 import com.tc.object.handshakemanager.ClientHandshakeManagerImpl;
 import com.tc.object.msg.ClientHandshakeMessageFactory;
 import com.tc.object.session.SessionManager;
 import com.tc.object.session.SessionProvider;
-import com.tc.runtime.logging.LongGCLogger;
-import com.tcclient.cluster.ClusterInternalEventsGun;
+import com.tc.util.ProductID;
 
 import java.util.Map;
+import java.util.Properties;
 
 
 public class StandardClientBuilder implements ClientBuilder {
-  @Override
-  public ClientMessageChannel createClientMessageChannel(CommunicationsManager commMgr,
-                                                         PreparedComponentsFromL2Connection connComp,
-                                                         SessionProvider sessionProvider, int maxReconnectTries,
-                                                         int socketConnectTimeout, TCClient client) {
-    final ConnectionAddressProvider cap = createConnectionAddressProvider(connComp);
-    return commMgr.createClientChannel(sessionProvider, maxReconnectTries, null, 0, socketConnectTimeout, cap);
+  
+  private final ProductID typeOfClient;
+  private volatile ClientConnectionErrorListener listener;
+
+  public StandardClientBuilder(Properties connectionProperties) {
+    this.typeOfClient = getTypeOfClient(connectionProperties);
   }
 
-  protected ConnectionAddressProvider createConnectionAddressProvider(PreparedComponentsFromL2Connection connComp) {
-    final ConnectionInfoConfig connectionInfoItem = connComp.createConnectionInfoConfigItem();
-    final ConnectionInfo[] connectionInfo = connectionInfoItem.getConnectionInfos();
-    final ConnectionAddressProvider cap = new ConnectionAddressProvider(connectionInfo);
-    return cap;
+  @Override
+  public ClientMessageChannel createClientMessageChannel(CommunicationsManager commMgr,
+                                                         SessionProvider sessionProvider, 
+                                                         int socketConnectTimeout, TCClient client) {
+    ClientMessageChannel cmc = commMgr.createClientChannel(typeOfClient, sessionProvider, socketConnectTimeout);
+    if (listener != null){
+      cmc.addClientConnectionErrorListener(listener);
+    }
+    return cmc;
   }
 
   @Override
   public CommunicationsManager createCommunicationsManager(MessageMonitor monitor, TCMessageRouter messageRouter,
                                                            NetworkStackHarnessFactory stackHarnessFactory,
-                                                           ConnectionPolicy connectionPolicy, int commThread,
+                                                           ConnectionPolicy connectionPolicy, 
                                                            HealthCheckerConfig aConfig,
                                                            Map<TCMessageType, Class<? extends TCMessage>> messageTypeClassMapping,
-                                                           ReconnectionRejectedHandler reconnectionRejectedHandler,
-                                                           TCSecurityManager securityManager, ProductID productId) {
+                                                           ReconnectionRejectedHandler reconnectionRejectedHandler) {
     return new CommunicationsManagerImpl(CommunicationsManager.COMMSMGR_CLIENT, monitor, messageRouter, stackHarnessFactory, null,
                                          connectionPolicy, 0, aConfig, new TransportHandshakeErrorHandlerForL1(), messageTypeClassMapping,
-                                         reconnectionRejectedHandler, securityManager, productId);
+                                         reconnectionRejectedHandler, getBufferManagerFactory());
   }
 
   @Override
-  public ClientHandshakeManager createClientHandshakeManager(TCLogger logger,
+  public ClientHandshakeManager createClientHandshakeManager(Logger logger,
                                                              ClientHandshakeMessageFactory chmf, 
                                                              SessionManager sessionManager,
                                                              ClusterInternalEventsGun clusterEventsGun, 
@@ -93,13 +95,33 @@ public class StandardClientBuilder implements ClientBuilder {
   }
 
   @Override
-  public LongGCLogger createLongGCLogger(long gcTimeOut) {
-    return new LongGCLogger(gcTimeOut);
-  }
-
-  @Override
   public ClientEntityManager createClientEntityManager(ClientMessageChannel channel, StageManager stages) {
     return new ClientEntityManagerImpl(channel, stages);
   }
 
+  protected ProductID getTypeOfClient(Properties connectionProperties) {
+    boolean noreconnect =
+        Boolean.valueOf(connectionProperties.getProperty(ConnectionPropertyNames.CONNECTION_DISABLE_RECONNECT,
+                                                         "false"));
+    String typeName = connectionProperties.getProperty(ConnectionPropertyNames.CONNECTION_TYPE);
+    ProductID product = (noreconnect) ? ProductID.SERVER : ProductID.PERMANENT;
+    try {
+      if (typeName != null) {
+        product = ProductID.valueOf(typeName);
+      }
+    } catch (IllegalArgumentException arg) {
+      // do nothing, just stick with the default
+    }
+
+    return product;
+  }
+
+  protected BufferManagerFactory getBufferManagerFactory() {
+    return new ClearTextBufferManagerFactory();
+  }
+
+  @Override
+  public void setClientConnectionErrorListener(ClientConnectionErrorListener listener) {
+    this.listener = listener;
+  }
 }

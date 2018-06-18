@@ -18,7 +18,8 @@
  */
 package com.tc.config;
 
-import com.tc.logging.TCLogging;
+import org.slf4j.LoggerFactory;
+
 import com.tc.text.StringUtils;
 
 import java.io.File;
@@ -45,39 +46,41 @@ public class Directories {
   /**
    * Relative location for server lib directory under Terracotta installation directory
    */
-  public static final String SERVER_LIB_DIR                                  = "server/lib";
+  public static final String SERVER_LIB_DIR                                  = "lib";
 
   /**
    * Relative location for server plugin api directory under Terracotta installation directory
    */
-  public static final String SERVER_PLUGIN_API_DIR                           = "server/plugins/api";
+  public static final String SERVER_PLUGIN_API_DIR                           = "plugins/api";
 
   /**
    * Relative location for server plugin lib directory under Terracotta installation directory
    */
-  public static final String SERVER_PLUGIN_LIB_DIR                           = "server/plugins/lib";
+  public static final String SERVER_PLUGIN_LIB_DIR                           = "plugins/lib";
+
+  /**
+   * Relative location for default configuration file under Terracotta installation directory
+   */
+  public static final String DEFAULT_CONFIG_FILE_LOCATION                    = "conf/tc-config.xml";
 
   /**
    * Get installation root directory.
    * 
-   * @return Installation root directory or null if TC_INSTALL_ROOT_IGNORE_CHECKS_PROPERTY_NAME is set and
+   * @return Installation root directory or {@code user.dir} if TC_INSTALL_ROOT_IGNORE_CHECKS_PROPERTY_NAME is set and
    *         TC_INSTALL_ROOT_PROPERTY_NAME is not.
-   * @throws FileNotFoundException If {@link #TC_INSTALL_ROOT_PROPERTY_NAME} has not been set. If
-   *         {@link #TC_INSTALL_ROOT_IGNORE_CHECKS_PROPERTY_NAME} has not been set, this exception may be thrown if the
-   *         installation root directory has not been set, is not a directory
+   * @throws FileNotFoundException If {@link #TC_INSTALL_ROOT_IGNORE_CHECKS_PROPERTY_NAME} has not been set,
+   *         this exception may be thrown if the installation root directory is not a directory
    */
-  public static File getInstallationRoot() throws FileNotFoundException {
+  static File getInstallationRoot() throws FileNotFoundException {
     boolean ignoreCheck = Boolean.getBoolean(TC_INSTALL_ROOT_IGNORE_CHECKS_PROPERTY_NAME);
     if (ignoreCheck) {
-      // XXX hack to have enterprise system tests to find license key under <ee-branch>/code/base
-      String baseDir = System.getProperty("tc.base-dir");
-      return new File(baseDir != null ? baseDir : ".", "../../../code/base");
+      return new File(System.getProperty("user.dir"));
     } else {
       String path = System.getProperty(TC_INSTALL_ROOT_PROPERTY_NAME);
       if (StringUtils.isBlank(path)) {
         //if not set, use working dir
         path = System.getProperty("user.dir");
-        TCLogging.getLogger(Directories.class).info("System property \"tc.install-root\" is not set, using working dir (" + path + ") as default location ");
+        LoggerFactory.getLogger(Directories.class).info("System property \"tc.install-root\" is not set, using working dir (" + path + ") as default location ");
       }
 
       File rootPath = new File(path).getAbsoluteFile();
@@ -89,6 +92,10 @@ public class Directories {
       }
       return rootPath;
     }
+  }
+
+  public static File getDefaultConfigFile() throws FileNotFoundException {
+    return new File(getInstallationRoot(), DEFAULT_CONFIG_FILE_LOCATION);
   }
 
   public static File getServerLibFolder() throws FileNotFoundException {

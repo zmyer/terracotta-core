@@ -18,10 +18,10 @@
  */
 package com.tc.net.core;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.tc.exception.TCInternalError;
-import com.tc.logging.TCLogger;
-import com.tc.logging.TCLogging;
-import com.tc.net.NIOWorkarounds;
 import com.tc.net.core.event.TCConnectionErrorEvent;
 import com.tc.net.core.event.TCConnectionEvent;
 import com.tc.net.core.event.TCConnectionEventListener;
@@ -37,6 +37,7 @@ import java.net.Socket;
 import java.nio.channels.CancelledKeyException;
 import java.nio.channels.Channel;
 import java.nio.channels.ClosedChannelException;
+import java.nio.channels.ClosedSelectorException;
 import java.nio.channels.GatheringByteChannel;
 import java.nio.channels.ScatteringByteChannel;
 import java.nio.channels.SelectableChannel;
@@ -47,13 +48,14 @@ import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Random;
+import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * The communication thread. Creates {@link Selector selector}, registers {@link SocketChannel} to the selector and does
@@ -63,7 +65,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 
 class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListener {
-  private static final TCLogger                logger        = TCLogging.getLogger(CoreNIOServices.class);
+  private static final Logger logger = LoggerFactory.getLogger(CoreNIOServices.class);
   private final TCWorkerCommManager            workerCommMgr;
   private final String                         commThreadName;
   private final SocketParams                   socketParams;
@@ -74,6 +76,7 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
   // maintains weight of all L1 Connections which is handled by this WorkerComm
   private final HashMap<TCConnection, Integer> managedConnectionsMap;
   private int                                  clientWeights;
+  private boolean                              isSelectedForWeighting;
   private final List<TCListener>               listeners     = new ArrayList<TCListener>();
   private String                               listenerString;
 
@@ -102,9 +105,15 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
     }
   }
 
-  public void cleanupChannel(SocketChannel channel, Runnable callback) {
-    readerComm.cleanupChannel(channel, callback);
-    writerComm.cleanupChannel(channel, callback);
+  public void cleanupChannel(final SocketChannel channel, final Runnable callback) {
+//  shutdown the writer side first, the the read side.  Doing this because
+//  cleanup can race with handshake if the writer side is shutdown after or in parallel
+    writerComm.cleanupChannel(channel, new Runnable() {
+      @Override
+      public void run() {
+        readerComm.cleanupChannel(channel, callback);
+      }
+    });
   }
 
   @Override
@@ -168,8 +177,57 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
   public long getTotalBytesWritten() {
     return readerComm.getTotalBytesWritten() + writerComm.getTotalBytesWritten();
   }
+  
+  public static boolean hasPendingReads() {
+    Thread t = Thread.currentThread();
+    if (t instanceof CommThread) {
+      CommThread ct = (CommThread)t;
+      if (ct.isReader()) {
+        try {
+          return ct.selector.selectedKeys().stream().anyMatch(key->{
+            try {
+              return key.isValid() && key.isReadable();
+            } catch (CancelledKeyException ck) {
+              return false;
+            }
+          });
+        } catch (ClosedSelectorException closed) {
+          return false;
+        }
+      }
+    }
+    return false;
+  }
+  
+  public boolean compareWeights(CoreNIOServices incoming) {
+    boolean retVal = false;
+// if incoming is passed in, the current search is the one that set the flag
+// so it is ok to assert the below is true
+    Assert.assertTrue(incoming == null || incoming.isSelectedForWeighting);
+    
+    synchronized (managedConnectionsMap) {
+      if (!isSelectedForWeighting) {
+        if (incoming == null || incoming.clientWeights > this.clientWeights) {
+          this.isSelectedForWeighting = true;
+          retVal = true;
+        }
+      }
+    }
+//  if trading, unset the previous selected
+    if (retVal && incoming != null) {
+      incoming.deselectForWeighting();
+    }
 
-  public int getWeight() {
+    return retVal;
+  }
+  
+  private void deselectForWeighting() {
+    synchronized (managedConnectionsMap) {
+      isSelectedForWeighting = false;
+    }
+  }
+
+  int getWeight() {
     synchronized (managedConnectionsMap) {
       return this.clientWeights;
     }
@@ -218,6 +276,7 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
       Assert.eval(!managedConnectionsMap.containsKey(connection));
       managedConnectionsMap.put(connection, initialWeight);
       this.clientWeights += initialWeight;
+      this.isSelectedForWeighting = false;
       connection.addListener(this);
     }
   }
@@ -249,8 +308,23 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
   }
 
   @Override
-  public synchronized String toString() {
-    return "[" + this.commThreadName + ", FD, wt:" + getWeight() + "]";
+  public String toString() {
+    synchronized (this.managedConnectionsMap) {
+      return "[" + this.commThreadName + ", FD, wt:" + this.clientWeights + "]";
+    }
+  }
+  
+  public String getName() {
+    return this.commThreadName;
+  }
+  
+  public Map<String, ?> getState() {
+    Map<String, Object> state = new LinkedHashMap<>();
+    state.put("name", this.commThreadName);
+    state.put("weights", this.clientWeights);
+    state.put("writer", this.writerComm.getCommState());
+    state.put("reader", this.readerComm.getCommState());
+    return state;
   }
 
   void requestConnectInterest(TCConnectionImpl conn, SocketChannel sc) {
@@ -284,10 +358,9 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
 
   protected class CommThread extends Thread {
     private final Selector                      selector;
-    private final LinkedBlockingQueue<Runnable> selectorTasks;
+    private final Queue<Runnable> selectorTasks;
     private final String                        name;
-    private final AtomicLong                    bytesRead    = new AtomicLong(0);
-    private final AtomicLong                    bytesWritten = new AtomicLong(0);
+    private long                    bytesMoved    = 0;
     private final COMM_THREAD_MODE              mode;
 
     public CommThread(COMM_THREAD_MODE mode) {
@@ -296,8 +369,17 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
       setName(name);
 
       this.selector = createSelector();
-      this.selectorTasks = new LinkedBlockingQueue<Runnable>();
+      this.selectorTasks = new ConcurrentLinkedQueue<Runnable>();
       this.mode = mode;
+    }
+    
+    private Map<String, ?> getCommState() {
+      Map<String, Object> state = new LinkedHashMap<>();
+      state.put("name", name);
+      state.put("mode", mode);
+      state.put("bytesMoved", bytesMoved);
+      state.put("selectorBacklog", selectorTasks.size());
+      return state;
     }
 
     private boolean isReader() {
@@ -343,18 +425,6 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
             return selector1;
           } catch (IOException ioe) {
             throw new RuntimeException(ioe);
-          } catch (NullPointerException npe) {
-            if (i < tries && NIOWorkarounds.selectorOpenRace(npe)) {
-              System.err
-                  .println("Attempting to work around sun bug 6427854 (attempt " + (i + 1) + " of " + tries + ")");
-              try {
-                Thread.sleep(new Random().nextInt(20) + 5);
-              } catch (InterruptedException ie) {
-                interrupted = true;
-              }
-              continue;
-            }
-            throw npe;
           }
         }
       } finally {
@@ -369,13 +439,15 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
 
       try {
         while (true) {
-          try {
-            this.selectorTasks.put(task);
-            break;
-          } catch (InterruptedException e) {
-            logger.warn(e);
-            isInterrupted = true;
+          while (!this.selectorTasks.offer(task)) {
+            try {
+              TimeUnit.SECONDS.sleep(5);  // this should actually never happen since the queue is unbounded.  
+              logger.warn("unable to add selector task");
+            } catch (InterruptedException ie) {
+              isInterrupted = true;
+            }
           }
+          break;
         }
       } finally {
         this.selector.wakeup();
@@ -423,12 +495,12 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
       try {
         cleanupChannel(ssc, null);
       } catch (Exception e) {
-        logger.error(e);
+        logger.error("Exception: ", e);
       } finally {
         try {
           callback.run();
         } catch (Exception e) {
-          logger.error(e);
+          logger.error("Exception: ", e);
         }
       }
     }
@@ -527,7 +599,7 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
       }
     }
 
-    private void dispose(Selector localSelector, LinkedBlockingQueue<Runnable> localSelectorTasks) {
+    private void dispose(Selector localSelector, Queue<Runnable> localSelectorTasks) {
       Assert.eval(Thread.currentThread() == this);
 
       if (localSelector != null) {
@@ -558,23 +630,13 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
       Assert.eval(Thread.currentThread() == this);
 
       Selector localSelector = this.selector;
-      LinkedBlockingQueue<Runnable> localSelectorTasks = this.selectorTasks;
+      Queue<Runnable> localSelectorTasks = this.selectorTasks;
 
       while (true) {
         final int numKeys;
         try {
           numKeys = localSelector.select();
         } catch (IOException ioe) {
-          if (NIOWorkarounds.linuxSelectWorkaround(ioe)) {
-            logger.warn("working around Sun bug 4504001");
-            continue;
-          }
-
-          if (NIOWorkaroundsTemp.solarisSelectWorkaround(ioe)) {
-            logger.warn("working around Solaris select IOException");
-            continue;
-          }
-
           throw ioe;
         } catch (CancelledKeyException cke) {
           logger.warn("Cencelled Key " + cke);
@@ -591,16 +653,7 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
         boolean isInterrupted = false;
         // run any pending selector tasks
         while (true) {
-          Runnable task;
-          while (true) {
-            try {
-              task = localSelectorTasks.poll(0, TimeUnit.MILLISECONDS);
-              break;
-            } catch (InterruptedException ie) {
-              logger.error("Error getting task from task queue", ie);
-              isInterrupted = true;
-            }
-          }
+          Runnable task = localSelectorTasks.poll();
 
           if (null == task) {
             break;
@@ -645,13 +698,13 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
               TCChannelReader reader = (TCChannelReader) key.attachment();
               do {
                 read = reader.doRead();
-                this.bytesRead.addAndGet(read);
+                bytesMoved += read;
               } while ((read != 0) && key.isReadable());
             }
 
             if (key.isValid() && !isReader() && key.isWritable()) {
               int written = ((TCChannelWriter) key.attachment()).doWrite();
-              this.bytesWritten.addAndGet(written);
+                bytesMoved += written;
             }
 
             TCConnection conn = (TCConnection) key.attachment();
@@ -660,15 +713,22 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
             }
 
           } catch (CancelledKeyException cke) {
-            logger.info("selection key cancelled key@" + key.hashCode());
+            logger.debug("selection key cancelled key@" + key.hashCode());
           } catch (Exception e) { // DEV-9369. Do not reconnect on fatal errors.
             logger.info("Unhandled exception occured on connection layer", e);
-            TCConnectionImpl conn = (TCConnectionImpl) key.attachment();
-            // TCConnectionManager will take care of closing and cleaning up resources
-            // key may not have an attachment yet.
-            if (conn != null) {
-              conn.fireErrorEvent(new RuntimeException(e), null);
+            Object attachment = key.attachment();
+            if (attachment instanceof TCConnectionImpl) {
+              TCConnectionImpl conn = (TCConnectionImpl) attachment;
+              // TCConnectionManager will take care of closing and cleaning up resources
+              // key may not have an attachment yet.
+              if (conn != null) {
+                conn.fireErrorEvent(new RuntimeException(e), null);
+              }
+            } else if (attachment instanceof TCListenerImpl) {
+              TCListenerImpl lsnr = (TCListenerImpl) key.attachment();
+              // just log
             }
+
           }
         } // for
       } // while (true)
@@ -708,8 +768,8 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
 
       try {
         if (sc.finishConnect()) {
-          sc.register(selector, SelectionKey.OP_READ, conn);
           conn.finishConnect();
+          sc.register(selector, SelectionKey.OP_READ, conn);
         } else {
           String errMsg = "finishConnect() returned false, but no exception thrown";
 
@@ -729,11 +789,11 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
     }
 
     public long getTotalBytesRead() {
-      return this.bytesRead.get();
+      return this.mode == COMM_THREAD_MODE.NIO_READER ? this.bytesMoved : 0;
     }
 
     public long getTotalBytesWritten() {
-      return this.bytesWritten.get();
+      return this.mode == COMM_THREAD_MODE.NIO_WRITER ? this.bytesMoved : 0;
     }
 
     private void handleRequest(final InterestRequest req) {
@@ -780,7 +840,7 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
         }
 
         if (logger.isDebugEnabled()) {
-          logger.debug(request);
+          logger.debug("{}", request);
         }
 
         if (request.add) {
@@ -893,24 +953,4 @@ class CoreNIOServices implements TCListenerEventListener, TCConnectionEventListe
       return buf.toString();
     }
   }
-
-  /**
-   * A temporary class. These apis are available in the latest tim-api version. Since, TC 3.6 can't use the newer
-   * tim-api version, having a copy of them here.
-   */
-  private static class NIOWorkaroundsTemp {
-    /**
-     * Workaround for select() throwing IOException("Bad file number") in Solaris Sun bug 6994017 looks related --
-     * http://wesunsolve.net/bugid/id/6994017
-     */
-    private static boolean solarisSelectWorkaround(IOException ioe) {
-      if (Os.isSolaris()) {
-        String msg = ioe.getMessage();
-        if ((msg != null) && msg.contains("Bad file number")) { return true; }
-      }
-      return false;
-    }
-
-  }
-
 }

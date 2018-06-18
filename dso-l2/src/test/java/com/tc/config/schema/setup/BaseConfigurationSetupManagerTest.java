@@ -40,6 +40,8 @@ import com.tc.object.config.schema.L2ConfigObject;
 import com.tc.test.TCTestCase;
 import com.tc.text.StringUtils;
 import com.tc.util.Assert;
+
+import org.terracotta.config.TCConfigDefaults;
 import org.terracotta.config.TcConfiguration;
 
 import java.io.File;
@@ -74,14 +76,9 @@ public class BaseConfigurationSetupManagerTest extends TCTestCase {
     Assert.assertEquals("0.0.0.0", server.getBind());
     Assert.assertEquals(InetAddress.getLocalHost().getHostAddress() + ":" + server.getTsaPort().getValue(), server.getName());
 
-    Assert.assertEquals(9510, server.getTsaPort().getValue());
+    Assert.assertEquals(TCConfigDefaults.TSA_PORT, server.getTsaPort().getValue());
     Assert.assertEquals(server.getBind(), server.getTsaPort().getBind());
-
-    int tempGroupPort = 9510 + L2ConfigObject.DEFAULT_GROUPPORT_OFFSET_FROM_TSAPORT;
-    int defaultGroupPort = ((tempGroupPort <= L2ConfigObject.MAX_PORTNUMBER) ? (tempGroupPort)
-        : (tempGroupPort % L2ConfigObject.MAX_PORTNUMBER) + L2ConfigObject.MIN_PORTNUMBER);
-
-    Assert.assertEquals(defaultGroupPort, server.getTsaGroupPort().getValue());
+    Assert.assertEquals(TCConfigDefaults.GROUP_PORT, server.getTsaGroupPort().getValue());
     Assert.assertEquals(server.getBind(), server.getTsaGroupPort().getBind());
   }
 
@@ -255,8 +252,9 @@ public class BaseConfigurationSetupManagerTest extends TCTestCase {
 //        .getPath(), tcConfiguration.getPlatformConfiguration().getServers().getServer().get(0).getDataBackup());
 
     //Changing default behaviour of the locations
-    Assert.assertEquals(new File(this.tcConfig.getParent() + File.separator + "logs").getAbsolutePath(),
-            server.getLogs());
+    String defaultPath = new File(this.tcConfig.getParent() + File.separator + "logs" + File.separator +
+                                InetAddress.getLocalHost().getHostName() + "-" + TCConfigDefaults.TSA_PORT).getAbsolutePath();
+    Assert.assertEquals(defaultPath, server.getLogs());
   }
 
   public void testServerDirectoryPaths() throws IOException, ConfigurationSetupException {
